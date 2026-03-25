@@ -191,6 +191,16 @@ function clearSession() {
   location.reload();
 }
 
+// === HTML Sanitization ===
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.appendChild(document.createTextNode(str));
+  return div.innerHTML;
+}
+
+const TYPE_LABELS = { parameters: "CHAIN", arrangement: "MAP", midi: "MIDI" };
+function getTypeLabel(type) { return TYPE_LABELS[type] || "MIDI"; }
+
 // === Client-side MIDI File Generation ===
 function generateMidiBlob(notes, bpm) {
   const ppq = 480;
@@ -608,13 +618,13 @@ function appendMessageToContainer(container, role, content, outputData, fileUrl)
 
   const paragraphs = content.split("\n\n").filter(Boolean);
   paragraphs.forEach((p) => {
-    const formatted = p.replace(/\n/g, "<br>");
+    const formatted = escapeHtml(p).replace(/\n/g, "<br>");
     html += `<p>${formatted}</p>`;
   });
 
   if (outputData) {
     const typeClass = outputData.type || "midi";
-    const typeLabel = outputData.type === "parameters" ? "CHAIN" : outputData.type === "arrangement" ? "MAP" : "MIDI";
+    const typeLabel = getTypeLabel(outputData.type);
     const hasMidiNotes = outputData.type === "midi" && Array.isArray(outputData.notes) && outputData.notes.length > 0;
     const previewId = hasMidiNotes ? `midi-preview-${Date.now()}` : "";
 
@@ -622,14 +632,14 @@ function appendMessageToContainer(container, role, content, outputData, fileUrl)
     let cardBody = "";
     if (hasMidiNotes) {
       const specsLine = outputData.specs || "";
-      cardBody = specsLine ? `<div class="output-card-specs">${specsLine}</div>` : "";
+      cardBody = specsLine ? `<div class="output-card-specs">${escapeHtml(specsLine)}</div>` : "";
     } else {
       const meta = outputData.sections
         ? outputData.sections.length + " sections"
         : outputData.chain
           ? outputData.chain.length + " devices"
           : "";
-      cardBody = (outputData.description ? `<div class="output-card-desc">${outputData.description}</div>` : "")
+      cardBody = (outputData.description ? `<div class="output-card-desc">${escapeHtml(outputData.description)}</div>` : "")
         + (meta ? `<div class="output-card-meta">${meta}</div>` : "");
     }
 
@@ -637,7 +647,7 @@ function appendMessageToContainer(container, role, content, outputData, fileUrl)
       <div class="output-card ${typeClass}">
         <div class="output-card-header">
           <span class="output-badge ${typeClass}">${typeLabel}</span>
-          <span class="output-card-name">${outputData.name || "output"}</span>
+          <span class="output-card-name">${escapeHtml(outputData.name || "output")}</span>
         </div>
         ${cardBody}
         ${hasMidiNotes ? `<canvas class="midi-preview" id="${previewId}"></canvas>` : ""}
@@ -650,16 +660,13 @@ function appendMessageToContainer(container, role, content, outputData, fileUrl)
   div.innerHTML = html;
   container.appendChild(div);
 
-  // Render MIDI piano roll preview if present
-  if (outputData && outputData.type === "midi" && Array.isArray(outputData.notes) && outputData.notes.length > 0) {
-    const canvas = div.querySelector(".midi-preview");
-    if (canvas) {
-      renderMidiPreview(outputData.notes, canvas);
-    }
-  }
+  const hasMidi = outputData && outputData.type === "midi" && Array.isArray(outputData.notes) && outputData.notes.length > 0;
 
-  // Attach client-side MIDI download handler
-  if (outputData && outputData.type === "midi" && Array.isArray(outputData.notes) && outputData.notes.length > 0) {
+  // Render MIDI piano roll preview and attach download handler
+  if (hasMidi) {
+    const canvas = div.querySelector(".midi-preview");
+    if (canvas) renderMidiPreview(outputData.notes, canvas);
+
     const dlBtn = div.querySelector(".midi-download-btn");
     if (dlBtn) {
       const capturedOutput = outputData;
@@ -677,7 +684,7 @@ function appendMessageToContainer(container, role, content, outputData, fileUrl)
   });
 
   // Native drag-and-drop for MIDI files (Electron → Ableton)
-  if (window.electronAPI && outputData && outputData.type === "midi" && Array.isArray(outputData.notes) && outputData.notes.length > 0) {
+  if (window.electronAPI && hasMidi) {
     const card = div.querySelector(".output-card");
     if (card) {
       card.setAttribute("draggable", "true");
@@ -920,13 +927,13 @@ function renderOutputList() {
       : "GENERAL";
     html += `<div class="output-group-label">${label}</div>`;
     outputs.forEach((o) => {
-      const typeLabel = o.type === "parameters" ? "CHAIN" : o.type === "arrangement" ? "MAP" : "MIDI";
+      const typeLabel = getTypeLabel(o.type);
       const elemAttr = o.element ? `data-dl-element="${o.element}"` : "";
       const isMidi = o.type === "midi" && Array.isArray(o.notes) && o.notes.length > 0;
       html += `
         <div class="output-item${isMidi ? " midi-draggable" : ""}" ${elemAttr} ${o.url ? `data-dl-url="${o.url}"` : ""} data-flat-idx="${flatIndex}">
           <span class="output-badge ${o.type}">${typeLabel}</span>
-          <span class="output-name">${o.name}</span>
+          <span class="output-name">${escapeHtml(o.name || "output")}</span>
         </div>
       `;
       flatIndex++;

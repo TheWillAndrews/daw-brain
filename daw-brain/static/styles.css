@@ -295,9 +295,6 @@ body[data-theme="light"] .theme-toggle-knob {
   box-shadow: var(--shadow-xs);
 }
 
-.session-bar-left {
-  flex-shrink: 0;
-}
 
 .session-bar-center {
   display: flex;
@@ -712,7 +709,6 @@ body[data-theme="light"] .element-status[data-status="empty"] {
 .resize-handle {
   height: 6px;
   background: var(--surface);
-  border-top: 1px solid var(--border);
   cursor: ns-resize;
   display: flex;
   align-items: center;
@@ -721,6 +717,17 @@ body[data-theme="light"] .element-status[data-status="empty"] {
   -webkit-user-select: none;
   flex-shrink: 0;
   z-index: 2;
+  position: relative;
+}
+
+.resize-handle::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  background: var(--border);
 }
 
 .resize-grip {
@@ -729,6 +736,8 @@ body[data-theme="light"] .element-status[data-status="empty"] {
   border-radius: 2px;
   background: var(--border-light);
   transition: background 0.15s ease;
+  position: relative;
+  z-index: 1;
 }
 
 .resize-handle:hover .resize-grip,
@@ -738,7 +747,6 @@ body[data-theme="light"] .element-status[data-status="empty"] {
 
 /* === Chat Area === */
 .element-chat {
-  border-top: 1px solid var(--border);
   background: var(--surface);
   display: flex;
   flex-direction: column;
@@ -1328,27 +1336,6 @@ body[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: rgba(0, 0
 .stem-download {
   text-decoration: none;
 }
-
-.vocal-sep-download-both {
-  background: var(--accent);
-  color: #000;
-  border: none;
-  border-radius: var(--radius-sm);
-  padding: 10px 24px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  align-self: center;
-  font-family: var(--font-ui);
-}
-
-.vocal-sep-download-both:hover {
-  opacity: 0.9;
-  box-shadow: 0 2px 12px var(--accent-glow);
-}
-
-.vocal-sep-download-both:active { transform: scale(0.98); }
 
 .vocal-sep-new {
   background: transparent;

@@ -2,9 +2,14 @@ __pycache__/
 *.pyc
 *.pyo
 outputs/
-outputs/stems/
 server.log
+.server.log
+.server.pid
+logs/
 .env
 *.onnx
 node_modules/
+dist/
+out/
 .DS_Store
+.claude/

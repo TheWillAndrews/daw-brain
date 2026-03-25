@@ -194,30 +194,6 @@ KNOWLEDGE_MAP = {
         ],
         "always_load": False,
     },
-    "mixing_mastering.md": {
-        "description": "Gain staging, EQ techniques, compression, spatial processing, saturation, mastering chain",
-        "keywords": [
-            "mixing", "mix down", "mixdown",
-            "gain staging", "gain stage", "headroom", "dbfs",
-            "eq", "equalization", "frequency", "high-pass", "low-pass",
-            "notch", "bell cut", "shelf",
-            "compression", "compressor", "ratio", "threshold",
-            "attack", "release", "knee", "gain reduction",
-            "parallel compression", "ny compression", "multiband compression",
-            "sidechain compression",
-            "reverb", "delay", "spatial", "stereo width", "stereo image",
-            "mono compatibility", "haas effect", "haas",
-            "saturation", "harmonic", "tape saturation", "warmth",
-            "distortion", "overdrive", "soft clip",
-            "mastering", "master chain", "master bus",
-            "limiter", "limiting", "lufs", "loudness",
-            "true peak", "dither", "dithering",
-            "export", "render", "bounce", "final mix",
-            "reference track", "a/b", "a/b comparison",
-            "dynamic range", "dynamics",
-        ],
-        "always_load": False,
-    },
 }
 
 
@@ -274,7 +250,8 @@ def select_knowledge(user_message, max_kbs=3):
 def load_knowledge(user_message, max_kbs=3):
     """Load and concatenate relevant knowledge base content.
 
-    Returns a single string with all relevant knowledge, separated by markers.
+    Returns (content_string, selected_list) where selected_list is
+    a list of (filename, score) tuples for logging.
     """
     selected = select_knowledge(user_message, max_kbs=max_kbs)
 
@@ -283,8 +260,8 @@ def load_knowledge(user_message, max_kbs=3):
         core_path = os.path.join(KNOWLEDGE_DIR, "tech_house_production.md")
         if os.path.exists(core_path):
             with open(core_path, "r") as f:
-                return f.read()
-        return ""
+                return f.read(), [("tech_house_production.md", 0)]
+        return "", []
 
     parts = []
     for kb_key, score in selected:
@@ -296,4 +273,4 @@ def load_knowledge(user_message, max_kbs=3):
         except (FileNotFoundError, IOError):
             continue
 
-    return "\n\n---\n\n".join(parts)
+    return "\n\n---\n\n".join(parts), selected

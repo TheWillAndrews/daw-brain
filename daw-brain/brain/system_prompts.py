@@ -1,6 +1,19 @@
 from brain.presets import get_preset
 from brain.knowledge import load_knowledge, select_knowledge
 
+# Single source of truth for element display names
+ELEMENT_NAMES = {
+    "kick": "Kick", "clap": "Clap/Snare", "hats": "Hats",
+    "perc": "Percussion", "toploop": "Top Loops",
+    "sub": "Sub Bass", "midbass": "Mid Bass",
+    "stabs": "Stabs", "lead": "Lead", "chords": "Chords", "pad": "Pad",
+    "arps": "Arps", "plucks": "Plucks",
+    "mainvox": "Main Vocal", "chops": "Chops", "hook": "Hook",
+    "adlibs": "Ad-libs",
+    "risers": "Risers", "downlifters": "Downlifters", "impacts": "Impacts",
+    "sweeps": "Sweeps", "transitions": "Transitions", "textures": "Textures",
+}
+
 
 # Condensed core principles — always injected regardless of which KBs load.
 # Extracted from tech_house_production.md section 13.
@@ -73,10 +86,7 @@ def build_system_prompt(session, genre_id="tech_house", user_message="",
         kb_hint = f"{ELEMENT_KB_HINTS[active_element]} {user_message}"
 
     # Load only the 1-2 most relevant knowledge bases per call (token budget)
-    knowledge_content = load_knowledge(kb_hint, max_kbs=2)
-
-    # Log which KBs were selected (useful for debugging token usage)
-    selected = select_knowledge(kb_hint, max_kbs=2)
+    knowledge_content, selected = load_knowledge(kb_hint, max_kbs=2)
     kb_names = ", ".join(f"{name} (score:{score})" for name, score in selected)
 
     prompt = f"""You are DAW Brain, an expert electronic music production AI for Ableton Live.
@@ -120,25 +130,13 @@ RESPONSE BEHAVIOR RULES (ALWAYS FOLLOW):
     # Element focus section
     if active_element and active_element in ELEMENT_KB_HINTS:
         element_label = active_element.replace("_", " ").upper()
-        # Map element to friendly names
-        element_names = {
-            "kick": "KICK", "clap": "CLAP/SNARE", "hats": "HATS",
-            "perc": "PERCUSSION", "toploop": "TOP LOOPS",
-            "sub": "SUB BASS", "midbass": "MID BASS",
-            "stabs": "STABS", "lead": "LEAD", "chords": "CHORDS", "pad": "PAD",
-            "arps": "ARPS", "plucks": "PLUCKS",
-            "mainvox": "MAIN VOCAL", "chops": "VOCAL CHOPS", "hook": "VOCAL HOOK",
-            "adlibs": "AD-LIBS",
-            "risers": "RISERS", "downlifters": "DOWNLIFTERS", "impacts": "IMPACTS",
-            "sweeps": "SWEEPS", "transitions": "TRANSITIONS", "textures": "TEXTURES",
-        }
         element_descriptions = {
             "arps": "Arpeggiated synth patterns. Sequenced melodic movement, typically 16th notes. Key element in tech house for hypnotic, rolling energy. Think CHASEWEST, SLAMM.",
             "plucks": "Short, percussive single-note melodic hits. Distinct from stabs (which are chordal). Tight decay, used for counter-melodies and call-and-response with bass or vocals.",
             "adlibs": "One-shot vocal hits, shouts, breaths, exclamations, spoken phrases. Not the main vocal, not melodic chops, not hooks. These are texture and energy — the vocal seasoning.",
             "textures": "Ambient atmospheres, vinyl noise, room tone, background washes, reverb tails. Sits behind everything in the mix. Adds depth and space without drawing attention.",
         }
-        label = element_names.get(active_element, element_label)
+        label = ELEMENT_NAMES.get(active_element, element_label).upper()
         desc = element_descriptions.get(active_element, "")
         desc_line = f" {desc}" if desc else ""
         prompt += f"ELEMENT FOCUS: The user is working on {label}.{desc_line} Focus your responses on this element — patterns, samples, processing, and how it fits the track.\n\n"
@@ -150,18 +148,7 @@ RESPONSE BEHAVIOR RULES (ALWAYS FOLLOW):
         if built_elements:
             prompt += "ELEMENTS ALREADY BUILT:\n"
             for elem_id, info in built_elements.items():
-                element_names = {
-                    "kick": "Kick", "clap": "Clap/Snare", "hats": "Hats",
-                    "perc": "Percussion", "toploop": "Top Loops",
-                    "sub": "Sub Bass", "midbass": "Mid Bass",
-                    "stabs": "Stabs", "lead": "Lead", "chords": "Chords", "pad": "Pad",
-                    "arps": "Arps", "plucks": "Plucks",
-                    "mainvox": "Main Vocal", "chops": "Chops", "hook": "Hook",
-                    "adlibs": "Ad-libs",
-                    "risers": "Risers", "downlifters": "Downlifters", "impacts": "Impacts",
-                    "sweeps": "Sweeps", "transitions": "Transitions", "textures": "Textures",
-                }
-                name = element_names.get(elem_id, elem_id)
+                name = ELEMENT_NAMES.get(elem_id, elem_id)
                 prompt += f"- {name}: {info['summary']}\n"
             prompt += "\nConsider the existing elements when generating. New elements should complement what's already built — avoid rhythmic clashes, fill frequency gaps, and create call-and-response relationships.\n\n"
 

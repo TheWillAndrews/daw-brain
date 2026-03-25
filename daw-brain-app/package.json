@@ -18,7 +18,8 @@
     "files": [
       "main.js",
       "preload.js",
-      "loading.html"
+      "loading.html",
+      "drag-icon.png"
     ],
     "extraResources": [
       {

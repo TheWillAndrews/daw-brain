@@ -5,6 +5,11 @@ OUTPUTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "outputs"
 PPQ = 480  # Ticks per quarter note
 
 
+def sanitize_filename(name):
+    """Sanitize a string for use as a filename (alphanumeric, hyphens, underscores)."""
+    return "".join(c if c.isalnum() or c in "_-" else "_" for c in name)
+
+
 def generate_midi(output_data, bpm=128):
     """Generate a .mid file from a parsed MIDI output object.
 
@@ -20,8 +25,7 @@ def generate_midi(output_data, bpm=128):
         return None
 
     name = output_data.get("name", "pattern")
-    # Sanitize filename
-    safe_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in name)
+    safe_name = sanitize_filename(name)
     filename = f"{safe_name}.mid"
 
     mid = mido.MidiFile(type=0, ticks_per_beat=PPQ)
@@ -43,13 +47,8 @@ def generate_midi(output_data, bpm=128):
         pitch = max(0, min(127, pitch))
         velocity = max(1, min(127, velocity))
 
-        start_tick = int((start - 1) * PPQ)
-        dur_tick = int(duration * PPQ)
-
-        if start_tick < 0:
-            start_tick = 0
-        if dur_tick < 1:
-            dur_tick = 1
+        start_tick = max(0, int((start - 1) * PPQ))
+        dur_tick = max(1, int(duration * PPQ))
 
         events.append((start_tick, "note_on", pitch, velocity))
         events.append((start_tick + dur_tick, "note_off", pitch, 0))

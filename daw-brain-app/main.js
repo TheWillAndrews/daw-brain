@@ -5,9 +5,21 @@ const http = require("http");
 const fs = require("fs");
 
 const PORT = 5050;
-const PYTHON = "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3";
 const POLL_INTERVAL = 500;
 const POLL_TIMEOUT = 15000;
+
+// Find Python 3 — try common locations, fall back to PATH
+function findPython() {
+  const candidates = [
+    "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3",
+    "/usr/local/bin/python3",
+    "/opt/homebrew/bin/python3",
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return "python3"; // rely on PATH
+}
 
 let mainWindow = null;
 let flaskProcess = null;
@@ -92,7 +104,7 @@ function startFlask(apiKey) {
 
   const logStream = fs.createWriteStream(logPath, { flags: "a" });
 
-  flaskProcess = spawn(PYTHON, ["app.py"], {
+  flaskProcess = spawn(findPython(), ["app.py"], {
     cwd: backendPath,
     env: env,
     stdio: ["ignore", "pipe", "pipe"],

@@ -4,7 +4,6 @@ import json
 import time
 import logging
 import tempfile
-import subprocess
 import traceback
 import threading
 from flask import Flask, request, jsonify, send_from_directory
@@ -12,7 +11,7 @@ import anthropic
 
 from brain.system_prompts import build_system_prompt
 from brain.output_parser import parse_response
-from brain.midi_generator import generate_midi
+from brain.midi_generator import generate_midi, sanitize_filename
 from brain.presets import list_presets
 from brain.vocal_separator import separate_vocals, OUTPUT_DIR as STEMS_DIR
 
@@ -127,7 +126,7 @@ def chat():
         # For arrangement and parameters, save as JSON
         if output_data and output_data.get("type") in ("arrangement", "parameters"):
             name = output_data.get("name", "output")
-            safe_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in name)
+            safe_name = sanitize_filename(name)
             filename = f"{safe_name}.json"
             os.makedirs(OUTPUTS_DIR, exist_ok=True)
             filepath = os.path.join(OUTPUTS_DIR, filename)
