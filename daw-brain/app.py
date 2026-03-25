@@ -9,13 +9,13 @@ import threading
 from flask import Flask, request, jsonify, send_from_directory, redirect, session
 import anthropic
 
-from brain.system_prompts import build_system_prompt
+from brain.system_prompts import build_system_prompt, build_taste_context
 from brain.output_parser import parse_response
 from brain.midi_generator import generate_midi, sanitize_filename
 from brain.presets import list_presets
 from brain.vocal_separator import separate_vocals, OUTPUT_DIR as STEMS_DIR
 from brain.database import (
-    init_db, ensure_default_user,
+    init_db, ensure_default_user, get_connection,
     save_full_session_state, load_full_session_state,
     create_session, get_active_session, get_user_sessions,
     update_session, get_all_elements, get_session_outputs,
@@ -28,7 +28,8 @@ from brain.database import (
 )
 from brain.spotify_auth import get_auth_url, handle_callback
 from brain.spotify_collector import collect_all_spotify_data
-from brain.spotify_profile import compute_taste_profile
+from brain.spotify_profile import compute_taste_profile, build_genre_sources, get_excluded_sources
+from brain.genre_attributes import compute_weighted_taste
 from brain.artist_researcher import start_background_research
 from brain.soundcloud_auth import (
     get_auth_url as sc_get_auth_url,
@@ -178,6 +179,10 @@ def chat():
         cleaned_text, output_data = parse_response(raw_text)
 
         result = {"text": cleaned_text, "output": output_data, "file_url": None}
+
+        # Dev diagnostic: include full system prompt when diagnostic flag is set
+        if data.get("diagnostic"):
+            result["debug_system_prompt"] = system_prompt
 
         if output_data and output_data.get("type") == "midi":
             bpm = session.get("bpm", 128)
@@ -508,6 +513,340 @@ def spotify_refresh():
 
     threading.Thread(target=refresh_pipeline, daemon=True).start()
     return jsonify({"ok": True, "message": "Refresh started"})
+
+
+@app.route("/api/spotify/exclude-source", methods=["POST"])
+def exclude_taste_source():
+    """Toggle a data source on/off for taste profile computation."""
+    data = request.get_json()
+    source = data.get("source")
+    exclude = data.get("exclude", True)
+
+    valid_sources = ["top_artists", "top_tracks", "followed_artists", "saved_tracks", "recent_plays"]
+    if source not in valid_sources:
+        return jsonify({"error": f"Invalid source. Must be one of: {valid_sources}"}), 400
+
+    user_id = get_current_user_id()
+
+    with get_connection() as db:
+        # Resolve to Spotify-connected user if needed
+        tokens = db.execute("SELECT user_id FROM spotify_tokens WHERE user_id = ?", (user_id,)).fetchone()
+        if not tokens:
+            fallback = db.execute("SELECT user_id FROM spotify_tokens ORDER BY last_refreshed DESC LIMIT 1").fetchone()
+            if fallback:
+                user_id = fallback["user_id"]
+
+        row = db.execute("SELECT excluded_taste_sources FROM users WHERE id = ?", (user_id,)).fetchone()
+        current = json.loads(row["excluded_taste_sources"] or "[]") if row else []
+
+        if exclude and source not in current:
+            current.append(source)
+        elif not exclude and source in current:
+            current.remove(source)
+
+        db.execute("UPDATE users SET excluded_taste_sources = ? WHERE id = ?", (json.dumps(current), user_id))
+
+    # Recompute taste profile with new exclusions
+    compute_taste_profile(user_id, excluded_sources=current)
+
+    return jsonify({"ok": True, "excluded_sources": current})
+
+
+# ─── Diagnostic ──────────────────────────────────────────────
+
+@app.route("/diagnostic")
+def diagnostic_page():
+    return send_from_directory("static", "diagnostic.html")
+
+
+@app.route("/api/spotify/diagnostic")
+def spotify_diagnostic():
+    """Full pipeline state: Spotify → Research → Storage → Generation."""
+    # Resolve user: try session cookie first, then find whoever has Spotify tokens
+    user_id = get_current_user_id()
+    diagnostic = {"stages": {}}
+
+    with get_connection() as db:
+        # Check if session user has tokens; if not, find the Spotify-connected user
+        session_tokens = db.execute(
+            "SELECT user_id FROM spotify_tokens WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if not session_tokens:
+            # Fall back: find any user with Spotify tokens
+            fallback = db.execute(
+                "SELECT user_id FROM spotify_tokens ORDER BY last_refreshed DESC LIMIT 1"
+            ).fetchone()
+            if fallback:
+                user_id = fallback["user_id"]
+
+        diagnostic["resolved_user_id"] = user_id
+
+        # STAGE 1: Connection status
+        try:
+            user = db.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            tokens = db.execute(
+                "SELECT user_id, token_expiry, scopes, last_refreshed "
+                "FROM spotify_tokens WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            diagnostic["stages"]["1_connection"] = {
+                "status": "connected" if tokens else "not_connected",
+                "user": dict(user) if user else None,
+            }
+        except Exception as e:
+            diagnostic["stages"]["1_connection"] = {"status": "error", "error": str(e)}
+
+        # STAGE 2: Raw data collection
+        try:
+            top_artists_count = db.execute(
+                "SELECT COUNT(*) as c FROM spotify_top_artists WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()["c"]
+            top_tracks_count = db.execute(
+                "SELECT COUNT(*) as c FROM spotify_top_tracks WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()["c"]
+            recent_plays_count = db.execute(
+                "SELECT COUNT(*) as c FROM spotify_recent_plays WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()["c"]
+            saved_tracks_count = db.execute(
+                "SELECT COUNT(*) as c FROM spotify_saved_tracks WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()["c"]
+
+            sample_artists = db.execute(
+                "SELECT artist_name, genres, time_range, rank "
+                "FROM spotify_top_artists WHERE user_id = ? "
+                "ORDER BY time_range, rank ASC",
+                (user_id,),
+            ).fetchall()
+
+            # Count genres — exclude empty JSON arrays '[]'
+            all_genres_raw = db.execute(
+                "SELECT genres FROM spotify_top_artists "
+                "WHERE user_id = ? AND genres IS NOT NULL AND genres != '' AND genres != '[]'",
+                (user_id,),
+            ).fetchall()
+            total_genre_tags = 0
+            unique_genres = set()
+            for row in all_genres_raw:
+                try:
+                    genres = json.loads(row["genres"]) if isinstance(row["genres"], str) else row["genres"]
+                    if isinstance(genres, list):
+                        total_genre_tags += len(genres)
+                        unique_genres.update(genres)
+                except Exception:
+                    pass
+
+            # Count how many artists have empty genres (the '[]' problem)
+            empty_genre_count = db.execute(
+                "SELECT COUNT(*) as c FROM spotify_top_artists "
+                "WHERE user_id = ? AND (genres IS NULL OR genres = '' OR genres = '[]')",
+                (user_id,),
+            ).fetchone()["c"]
+
+            all_top_tracks = db.execute(
+                "SELECT track_name, artist_name, album_name, time_range, rank, bpm, energy, danceability "
+                "FROM spotify_top_tracks WHERE user_id = ? "
+                "ORDER BY time_range, rank ASC",
+                (user_id,),
+            ).fetchall()
+
+            followed_artists_count = db.execute(
+                "SELECT COUNT(*) as c FROM followed_artists WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()["c"]
+
+            all_followed_artists = db.execute(
+                "SELECT name, genres, spotify_id FROM followed_artists "
+                "WHERE user_id = ? ORDER BY name ASC",
+                (user_id,),
+            ).fetchall()
+
+            all_saved_tracks = db.execute(
+                "SELECT track_name, artist_name, album_name, added_at, bpm, energy, danceability "
+                "FROM spotify_saved_tracks WHERE user_id = ? "
+                "ORDER BY added_at DESC",
+                (user_id,),
+            ).fetchall()
+
+            all_recent_plays = db.execute(
+                "SELECT track_name, artist_name, played_at, context_type "
+                "FROM spotify_recent_plays WHERE user_id = ? "
+                "ORDER BY played_at DESC",
+                (user_id,),
+            ).fetchall()
+
+            diagnostic["stages"]["2_raw_data"] = {
+                "status": "has_data" if top_artists_count > 0 else "empty",
+                "counts": {
+                    "top_artists": top_artists_count,
+                    "top_tracks": top_tracks_count,
+                    "followed_artists": followed_artists_count,
+                    "saved_tracks": saved_tracks_count,
+                    "recent_plays": recent_plays_count,
+                },
+                "genre_stats": {
+                    "total_genre_tags": total_genre_tags,
+                    "unique_genres": len(unique_genres),
+                    "sample_genres": sorted(list(unique_genres))[:20],
+                    "artists_with_empty_genres": empty_genre_count,
+                    "artists_total": top_artists_count,
+                },
+                "sample_artists": [dict(a) for a in sample_artists],
+                "top_tracks": [dict(t) for t in all_top_tracks],
+                "followed_artists": [dict(a) for a in all_followed_artists],
+                "saved_tracks": [dict(s) for s in all_saved_tracks],
+                "recent_plays": [dict(r) for r in all_recent_plays],
+            }
+        except Exception as e:
+            diagnostic["stages"]["2_raw_data"] = {"status": "error", "error": str(e)}
+
+        # STAGE 3: Taste profile — live-compute weighted profile from all sources
+        try:
+            excluded_row = db.execute(
+                "SELECT excluded_taste_sources FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            excluded = json.loads(excluded_row["excluded_taste_sources"] or "[]") if excluded_row else []
+
+            genre_sources = build_genre_sources(user_id)
+            weighted = compute_weighted_taste(genre_sources, excluded_sources=excluded)
+
+            # Also check if a stored profile exists in the DB
+            stored = db.execute(
+                "SELECT * FROM spotify_taste_profiles WHERE user_id = ?", (user_id,)
+            ).fetchone()
+
+            has_data = weighted.get("total_weighted_genres", 0) > 0
+
+            reason = None
+            if not has_data:
+                genre_stats = diagnostic["stages"].get("2_raw_data", {}).get("genre_stats", {})
+                if genre_stats.get("total_genre_tags", 0) == 0:
+                    reason = (
+                        f"All {genre_stats.get('artists_total', 0)} artists have empty genre arrays from Spotify. "
+                        "compute_taste_profile() requires genre data to compute attributes. "
+                        "This is a Spotify API limitation — many smaller/niche artists lack genre tags."
+                    )
+                else:
+                    reason = "Genre data exists but no weighted sources contributed. Check excluded sources."
+
+            diagnostic["stages"]["3_taste_profile"] = {
+                "status": "computed" if has_data else "missing",
+                "stored_in_db": stored is not None,
+                "profile": weighted,
+                "reason": reason,
+            }
+        except Exception as e:
+            diagnostic["stages"]["3_taste_profile"] = {"status": "error", "error": str(e)}
+
+        # STAGE 4: Artist research / Production DNA
+        try:
+            researched_count = db.execute(
+                "SELECT COUNT(*) as c FROM artist_research_cache"
+            ).fetchone()["c"]
+            sample_research = db.execute(
+                "SELECT artist_name, production_profile "
+                "FROM artist_research_cache LIMIT 5"
+            ).fetchall()
+
+            # Count how many have real research vs "I don't have" placeholders
+            no_data_count = db.execute(
+                "SELECT COUNT(*) as c FROM artist_research_cache "
+                "WHERE production_profile LIKE '%don''t have specific%' "
+                "OR production_profile LIKE '%don''t have sufficient%'"
+            ).fetchone()["c"]
+
+            queue_count = 0
+            try:
+                queue_count = db.execute(
+                    "SELECT COUNT(*) as c FROM research_queue WHERE status = 'pending'"
+                ).fetchone()["c"]
+            except Exception:
+                pass
+
+            diagnostic["stages"]["4_artist_research"] = {
+                "status": "has_research" if researched_count > 0 else "empty",
+                "researched_artists": researched_count,
+                "no_data_artists": no_data_count,
+                "useful_research": researched_count - no_data_count,
+                "pending_in_queue": queue_count,
+                "sample_research": [
+                    {
+                        "artist": dict(r)["artist_name"],
+                        "summary_preview": (dict(r).get("production_profile") or "")[:200],
+                    }
+                    for r in sample_research
+                ],
+            }
+        except Exception as e:
+            diagnostic["stages"]["4_artist_research"] = {"status": "error", "error": str(e)}
+
+        # STAGE 5: Related artists graph
+        try:
+            graph_edges = db.execute(
+                "SELECT COUNT(*) as c FROM artist_graph"
+            ).fetchone()["c"]
+            sample_edges = db.execute(
+                "SELECT source_name, related_name FROM artist_graph LIMIT 10"
+            ).fetchall()
+
+            diagnostic["stages"]["5_artist_graph"] = {
+                "status": "populated" if graph_edges > 0 else "empty",
+                "total_edges": graph_edges,
+                "sample_connections": [
+                    f"{dict(e)['source_name']} \u2192 {dict(e)['related_name']}"
+                    for e in sample_edges
+                ],
+            }
+        except Exception as e:
+            diagnostic["stages"]["5_artist_graph"] = {"status": "not_built", "error": str(e)}
+
+    # STAGE 6: System prompt injection (outside the db context manager)
+    try:
+        prompt_section = build_taste_context(user_id)
+        diagnostic["stages"]["6_prompt_injection"] = {
+            "status": "active" if prompt_section and len(prompt_section.strip()) > 0 else "inactive",
+            "prompt_preview": prompt_section[:500] if prompt_section else "No taste profile section generated",
+            "char_count": len(prompt_section) if prompt_section else 0,
+        }
+    except Exception as e:
+        diagnostic["stages"]["6_prompt_injection"] = {"status": "error", "error": str(e)}
+
+    # STAGE 7: Generation readiness
+    stage_status_map = {
+        "1_connection": ["connected"],
+        "2_raw_data": ["has_data"],
+        "3_taste_profile": ["computed"],
+        "4_artist_research": ["has_research"],
+        "5_artist_graph": ["populated"],
+        "6_prompt_injection": ["active"],
+    }
+    all_working = all(
+        diagnostic["stages"].get(key, {}).get("status") in ok_statuses
+        for key, ok_statuses in stage_status_map.items()
+    )
+    diagnostic["stages"]["7_generation_ready"] = {
+        "status": "ready" if all_working else "not_ready",
+        "message": (
+            "All pipeline stages have data. Taste profile will influence generations."
+            if all_working
+            else "Some pipeline stages are missing data. See above for details."
+        ),
+    }
+
+    diagnostic["pipeline_health"] = {
+        "stages_working": sum(
+            1
+            for key, ok_statuses in stage_status_map.items()
+            if diagnostic["stages"].get(key, {}).get("status") in ok_statuses
+        ),
+        "stages_total": 7,
+    }
+
+    return jsonify(diagnostic)
 
 
 # ─── SoundCloud API ───────────────────────────────────────────

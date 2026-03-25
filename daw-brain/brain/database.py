@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS users (
     preferred_key     TEXT DEFAULT 'E',
     preferred_scale   TEXT DEFAULT 'minor',
     theme             TEXT DEFAULT 'dark',
+    excluded_taste_sources TEXT DEFAULT '[]',
     created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_login        TIMESTAMP DEFAULT CURRENT_TIMESTAMP

@@ -12,10 +12,10 @@ import logging
 from collections import Counter
 
 from brain.database import (
-    get_user_top_artists, get_all_genres_for_user,
+    get_connection, get_user_top_artists, get_all_genres_for_user,
     save_taste_profile,
 )
-from brain.genre_attributes import compute_taste_from_genres
+from brain.genre_attributes import compute_taste_from_genres, compute_weighted_taste
 
 log = logging.getLogger("daw-brain")
 
@@ -73,26 +73,166 @@ def _analyze_genres(user_id):
     return top_genres, evolving
 
 
-def compute_taste_profile(user_id):
+def _parse_genres_column(raw):
+    """Safely parse a JSON genres column value into a list."""
+    if not raw:
+        return []
+    try:
+        genres = json.loads(raw) if isinstance(raw, str) else raw
+        return genres if isinstance(genres, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def build_genre_sources(user_id):
+    """Pull genre data from all Spotify sources, grouped by source type.
+
+    Returns dict suitable for compute_weighted_taste().
+    """
+    sources = {}
+
+    with get_connection() as conn:
+        # TOP ARTISTS — genres stored directly on artist rows
+        rows = conn.execute(
+            "SELECT genres FROM spotify_top_artists "
+            "WHERE user_id = ? AND genres IS NOT NULL AND genres != '' AND genres != '[]'",
+            (user_id,),
+        ).fetchall()
+        sources["top_artists"] = []
+        for row in rows:
+            sources["top_artists"].extend(_parse_genres_column(row["genres"]))
+
+        # TOP TRACKS — cross-reference artist_id against top_artists/followed_artists for genres
+        track_artist_ids = [
+            r["artist_id"] for r in conn.execute(
+                "SELECT DISTINCT artist_id FROM spotify_top_tracks "
+                "WHERE user_id = ? AND artist_id IS NOT NULL",
+                (user_id,),
+            ).fetchall()
+        ]
+        sources["top_tracks"] = []
+        for aid in track_artist_ids:
+            artist_row = conn.execute(
+                "SELECT genres FROM spotify_top_artists WHERE artist_id = ? AND genres IS NOT NULL LIMIT 1",
+                (aid,),
+            ).fetchone()
+            if not artist_row:
+                artist_row = conn.execute(
+                    "SELECT genres FROM followed_artists WHERE spotify_id = ? AND genres IS NOT NULL LIMIT 1",
+                    (aid,),
+                ).fetchone()
+            if artist_row:
+                sources["top_tracks"].extend(_parse_genres_column(artist_row["genres"]))
+
+        # FOLLOWED ARTISTS — genres stored directly
+        rows = conn.execute(
+            "SELECT genres FROM followed_artists "
+            "WHERE user_id = ? AND genres IS NOT NULL AND genres != '' AND genres != '[]'",
+            (user_id,),
+        ).fetchall()
+        sources["followed_artists"] = []
+        for row in rows:
+            sources["followed_artists"].extend(_parse_genres_column(row["genres"]))
+
+        # SAVED TRACKS — cross-reference artist_id
+        saved_artist_ids = [
+            r["artist_id"] for r in conn.execute(
+                "SELECT DISTINCT artist_id FROM spotify_saved_tracks "
+                "WHERE user_id = ? AND artist_id IS NOT NULL",
+                (user_id,),
+            ).fetchall()
+        ]
+        sources["saved_tracks"] = []
+        for aid in saved_artist_ids:
+            artist_row = conn.execute(
+                "SELECT genres FROM spotify_top_artists WHERE artist_id = ? AND genres IS NOT NULL LIMIT 1",
+                (aid,),
+            ).fetchone()
+            if not artist_row:
+                artist_row = conn.execute(
+                    "SELECT genres FROM followed_artists WHERE spotify_id = ? AND genres IS NOT NULL LIMIT 1",
+                    (aid,),
+                ).fetchone()
+            if artist_row:
+                sources["saved_tracks"].extend(_parse_genres_column(artist_row["genres"]))
+
+        # RECENTLY PLAYED — no artist_id column, match by artist_name
+        recent_names = [
+            r["artist_name"] for r in conn.execute(
+                "SELECT DISTINCT artist_name FROM spotify_recent_plays "
+                "WHERE user_id = ? AND artist_name IS NOT NULL",
+                (user_id,),
+            ).fetchall()
+        ]
+        sources["recent_plays"] = []
+        for name in recent_names:
+            artist_row = conn.execute(
+                "SELECT genres FROM spotify_top_artists WHERE artist_name = ? AND genres IS NOT NULL LIMIT 1",
+                (name,),
+            ).fetchone()
+            if not artist_row:
+                artist_row = conn.execute(
+                    "SELECT genres FROM followed_artists WHERE name = ? AND genres IS NOT NULL LIMIT 1",
+                    (name,),
+                ).fetchone()
+            if artist_row:
+                sources["recent_plays"].extend(_parse_genres_column(artist_row["genres"]))
+
+    return sources
+
+
+def get_excluded_sources(user_id):
+    """Read the user's excluded taste sources from the database."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT excluded_taste_sources FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if row and row["excluded_taste_sources"]:
+            try:
+                return json.loads(row["excluded_taste_sources"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return []
+
+
+def compute_taste_profile(user_id, excluded_sources=None):
     """Compute the quantitative taste profile from all stored Spotify data.
 
-    Uses genre-based attribute lookup (genre_attributes.py) instead of
+    Uses weighted multi-source genre lookup (genre_attributes.py) instead of
     deprecated Spotify audio features.
     """
     log.info(f"Computing taste profile for user {user_id}")
 
-    # Gather all genre tags (weighted by time range + followed artists)
+    # Load excluded sources from DB if not provided
+    if excluded_sources is None:
+        excluded_sources = get_excluded_sources(user_id)
+
+    # Build genre sources from all Spotify data tables
+    genre_sources = build_genre_sources(user_id)
+
+    # Also gather flat genre list for evolution analysis (uses old path)
     all_genres = get_all_genres_for_user(user_id)
 
-    if not all_genres:
+    # Compute weighted taste from grouped sources
+    taste = compute_weighted_taste(genre_sources, excluded_sources=excluded_sources)
+
+    # If weighted computation found no genres, fall back to flat list
+    if taste["total_weighted_genres"] == 0 and all_genres:
+        log.info("Weighted sources empty, falling back to flat genre list")
+        taste = compute_taste_from_genres(all_genres)
+        taste["sources_used"] = [{"source": "flat_fallback", "genre_count": len(all_genres), "weight": 1, "effective_count": len(all_genres)}]
+        taste["total_weighted_genres"] = len(all_genres)
+        taste["excluded_sources"] = excluded_sources
+
+    if taste.get("genre_count", 0) == 0 and taste.get("total_weighted_genres", 0) == 0:
         log.warning(f"No genre data found for user {user_id}")
         return None
 
-    # Compute taste attributes from genres
-    taste = compute_taste_from_genres(all_genres)
-
     # Genre analysis with evolution tracking
     top_genres, evolving_taste = _analyze_genres(user_id)
+    # Use top_genres from weighted result if it has them
+    if taste.get("top_genres"):
+        top_genres = taste["top_genres"]
 
     # Build profile dict matching the DB schema
     profile = {

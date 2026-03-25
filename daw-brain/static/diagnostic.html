@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DAW Brain — Pipeline Diagnostic</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif;
+            background: #0e0e10;
+            color: #e0e0e0;
+            padding: 24px;
+            line-height: 1.5;
+        }
+        h1 { font-size: 20px; font-weight: 600; margin-bottom: 8px; color: #fff; }
+        .subtitle { font-size: 13px; color: #888; margin-bottom: 24px; }
+        .pipeline { display: flex; flex-direction: column; gap: 16px; max-width: 900px; }
+
+        .stage {
+            background: #1a1a1e;
+            border: 1px solid #2a2a2e;
+            border-radius: 12px;
+            padding: 20px;
+            position: relative;
+        }
+        .stage.ok { border-left: 3px solid #22c55e; }
+        .stage.warn { border-left: 3px solid #eab308; }
+        .stage.err { border-left: 3px solid #ef4444; }
+
+        .stage-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .stage-number {
+            width: 28px; height: 28px;
+            border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 13px; font-weight: 600;
+            flex-shrink: 0;
+        }
+        .ok .stage-number { background: #22c55e22; color: #22c55e; }
+        .warn .stage-number { background: #eab30822; color: #eab308; }
+        .err .stage-number { background: #ef444422; color: #ef4444; }
+
+        .stage-title { font-size: 15px; font-weight: 600; color: #fff; }
+        .stage-status {
+            margin-left: auto;
+            font-size: 12px;
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-weight: 500;
+        }
+        .ok .stage-status { background: #22c55e22; color: #22c55e; }
+        .warn .stage-status { background: #eab30822; color: #eab308; }
+        .err .stage-status { background: #ef444422; color: #ef4444; }
+
+        .stage-body { font-size: 13px; color: #aaa; }
+        .stage-body pre {
+            background: #12121a;
+            border: 1px solid #2a2a2e;
+            border-radius: 8px;
+            padding: 12px;
+            font-family: 'JetBrains Mono', 'SF Mono', monospace;
+            font-size: 12px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            margin-top: 8px;
+            color: #ccc;
+        }
+
+        .data-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 8px;
+            margin-top: 8px;
+        }
+        .data-card {
+            background: #12121a;
+            border: 1px solid #2a2a2e;
+            border-radius: 8px;
+            padding: 10px;
+            text-align: center;
+        }
+        .data-card .value { font-size: 24px; font-weight: 700; color: #fff; }
+        .data-card .label { font-size: 11px; color: #888; margin-top: 2px; }
+
+        .genre-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+        .genre-tag {
+            background: #22c55e15;
+            border: 1px solid #22c55e33;
+            color: #22c55e;
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 12px;
+        }
+
+        .artist-list { margin-top: 8px; }
+        .artist-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            border-bottom: 1px solid #1e1e22;
+            font-size: 13px;
+        }
+        .artist-item:last-child { border-bottom: none; }
+        .artist-name { color: #fff; font-weight: 500; }
+        .artist-genres { color: #888; font-size: 11px; }
+
+        .prompt-preview {
+            background: #12121a;
+            border: 1px solid #eab30833;
+            border-radius: 8px;
+            padding: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            margin-top: 8px;
+            color: #eab308;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .research-item {
+            padding: 8px 0;
+            border-bottom: 1px solid #1e1e22;
+        }
+        .research-item:last-child { border-bottom: none; }
+        .research-artist { color: #fff; font-weight: 500; font-size: 13px; }
+        .research-summary { color: #888; font-size: 12px; margin-top: 4px; }
+
+        .artist-dropdown summary::-webkit-details-marker { color: #555; }
+        .artist-dropdown[open] summary { margin-bottom: 4px; }
+
+        .graph-edge { font-size: 12px; color: #aaa; padding: 3px 0; }
+        .graph-edge span { color: #8b5cf6; }
+
+        .controls {
+            display: flex; gap: 10px; margin-bottom: 24px;
+        }
+        .btn {
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid #2a2a2e;
+            background: #1a1a1e;
+            color: #fff;
+            font-size: 13px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .btn:hover { background: #2a2a2e; }
+        .btn-primary { background: #22c55e22; border-color: #22c55e44; color: #22c55e; }
+        .btn-primary:hover { background: #22c55e33; }
+
+        .loading { text-align: center; padding: 40px; color: #888; }
+
+        .test-section {
+            margin-top: 24px;
+            background: #1a1a1e;
+            border: 1px solid #2a2a2e;
+            border-radius: 12px;
+            padding: 20px;
+        }
+        .test-section h2 { font-size: 16px; margin-bottom: 12px; }
+        .test-output { margin-top: 12px; }
+        .test-label { font-size: 12px; color: #888; margin-bottom: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+    </style>
+</head>
+<body>
+    <h1>Pipeline Diagnostic</h1>
+    <p class="subtitle">Spotify &rarr; Research &rarr; Storage &rarr; Generation &mdash; full pipeline state</p>
+
+    <div class="controls">
+        <button class="btn btn-primary" onclick="loadDiagnostic()">Refresh</button>
+        <button class="btn" onclick="testGeneration()">Test Generation</button>
+    </div>
+
+    <div id="pipeline" class="pipeline">
+        <div class="loading">Loading pipeline state...</div>
+    </div>
+
+    <div id="test-section" class="test-section" style="display:none;">
+        <h2>Generation Test</h2>
+        <p style="font-size:13px;color:#888;margin-bottom:12px;">
+            Sends "Generate a 4-bar bass pattern" and shows whether taste profile influenced the output.
+        </p>
+        <div id="test-output" class="test-output"></div>
+    </div>
+
+    <script>
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        async function loadDiagnostic() {
+            const container = document.getElementById('pipeline');
+            container.innerHTML = '<div class="loading">Loading...</div>';
+
+            try {
+                const res = await fetch('/api/spotify/diagnostic');
+                const data = await res.json();
+                renderPipeline(data, container);
+            } catch (err) {
+                container.innerHTML = `<div class="stage err"><div class="stage-body">Failed to load: ${escapeHtml(err.message)}. Is the server running on port 5050?</div></div>`;
+            }
+        }
+
+        function stageClass(status) {
+            if (['connected', 'has_data', 'computed', 'has_research', 'populated', 'active', 'ready'].includes(status)) return 'ok';
+            if (['not_connected', 'empty', 'missing', 'not_built', 'inactive', 'not_ready'].includes(status)) return 'err';
+            return 'warn';
+        }
+
+        function renderPipeline(data, container) {
+            const stages = data.stages;
+            let html = '';
+
+            // Show resolved user
+            if (data.resolved_user_id) {
+                html += `<div style="font-size:12px;color:#555;margin-bottom:8px;">Diagnostic resolved to user_id=${data.resolved_user_id}</div>`;
+            }
+
+            // Stage 1: Connection
+            const s1 = stages['1_connection'] || {};
+            html += renderStage(1, 'Spotify Connection', s1.status, () => {
+                if (s1.status === 'connected' && s1.user) {
+                    return `Connected as <strong>${escapeHtml(s1.user.display_name || 'unknown')}</strong> (user ID: ${s1.user.id || 'unknown'})`;
+                }
+                return 'Not connected. Click "Connect Spotify" in the main app to start.';
+            });
+
+            // Stage 2: Raw Data
+            const s2 = stages['2_raw_data'] || {};
+            html += renderStage(2, 'Data Collection', s2.status, () => {
+                if (s2.status === 'error') return `Error: ${escapeHtml(s2.error)}`;
+                if (s2.status === 'empty') return 'No data collected. Connect Spotify first.';
+
+                const c = s2.counts || {};
+                let out = `<div class="data-grid">
+                    <div class="data-card"><div class="value">${c.top_artists || 0}</div><div class="label">Top Artists</div></div>
+                    <div class="data-card"><div class="value">${c.top_tracks || 0}</div><div class="label">Top Tracks</div></div>
+                    <div class="data-card"><div class="value">${c.followed_artists || 0}</div><div class="label">Followed Artists</div></div>
+                    <div class="data-card"><div class="value">${c.saved_tracks || 0}</div><div class="label">Saved Tracks</div></div>
+                    <div class="data-card"><div class="value">${c.recent_plays || 0}</div><div class="label">Recent Plays</div></div>
+                </div>`;
+
+                const g = s2.genre_stats || {};
+                if (g.unique_genres > 0) {
+                    out += `<div style="margin-top:12px;font-size:13px;color:#fff;">${g.total_genre_tags} genre tags across ${g.unique_genres} unique genres</div>`;
+                    out += '<div class="genre-tags">';
+                    (g.sample_genres || []).forEach(genre => {
+                        out += `<span class="genre-tag">${escapeHtml(genre)}</span>`;
+                    });
+                    out += '</div>';
+                } else {
+                    const empty = g.artists_with_empty_genres || 0;
+                    const total = g.artists_total || 0;
+                    out += `<div style="margin-top:8px;color:#ef4444;font-size:13px;">No genre tags found. ${empty}/${total} artists have empty genre arrays from Spotify API. This blocks taste profile computation.</div>`;
+                }
+
+                // 1. Top Artists dropdown
+                if (s2.sample_artists && s2.sample_artists.length > 0) {
+                    const grouped = {};
+                    s2.sample_artists.forEach(a => {
+                        const tr = a.time_range || 'unknown';
+                        if (!grouped[tr]) grouped[tr] = [];
+                        grouped[tr].push(a);
+                    });
+                    const rangeLabels = { short_term: 'Last 4 Weeks', medium_term: 'Last 6 Months', long_term: 'All Time' };
+
+                    out += `<details class="artist-dropdown" style="margin-top:12px;">`;
+                    out += `<summary style="cursor:pointer;font-size:12px;font-weight:600;color:#888;user-select:none;padding:6px 0;">TOP ARTISTS (${s2.sample_artists.length}) — click to expand</summary>`;
+                    out += '<div class="artist-list" style="margin-top:4px;">';
+                    for (const range of ['short_term', 'medium_term', 'long_term']) {
+                        const artists = grouped[range];
+                        if (!artists || artists.length === 0) continue;
+                        out += `<div style="font-size:11px;color:#22c55e;font-weight:600;margin-top:10px;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px;">${rangeLabels[range] || range} (${artists.length})</div>`;
+                        artists.forEach(a => {
+                            let genres = '';
+                            try { genres = JSON.parse(a.genres || '[]').join(', '); } catch(e) { genres = a.genres || ''; }
+                            out += `<div class="artist-item">
+                                <span><span class="artist-name">#${a.rank} ${escapeHtml(a.artist_name)}</span></span>
+                                <span class="artist-genres">${escapeHtml(genres) || 'no genres'}</span>
+                            </div>`;
+                        });
+                    }
+                    out += '</div></details>';
+                }
+
+                // 2. Top Tracks dropdown
+                if (s2.top_tracks && s2.top_tracks.length > 0) {
+                    const grouped = {};
+                    s2.top_tracks.forEach(t => {
+                        const tr = t.time_range || 'unknown';
+                        if (!grouped[tr]) grouped[tr] = [];
+                        grouped[tr].push(t);
+                    });
+                    const rangeLabels = { short_term: 'Last 4 Weeks', medium_term: 'Last 6 Months', long_term: 'All Time' };
+
+                    out += `<details class="artist-dropdown" style="margin-top:8px;">`;
+                    out += `<summary style="cursor:pointer;font-size:12px;font-weight:600;color:#888;user-select:none;padding:6px 0;">TOP TRACKS (${s2.top_tracks.length}) — click to expand</summary>`;
+                    out += '<div class="artist-list" style="margin-top:4px;">';
+                    for (const range of ['short_term', 'medium_term', 'long_term']) {
+                        const tracks = grouped[range];
+                        if (!tracks || tracks.length === 0) continue;
+                        out += `<div style="font-size:11px;color:#22c55e;font-weight:600;margin-top:10px;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px;">${rangeLabels[range] || range} (${tracks.length})</div>`;
+                        tracks.forEach(t => {
+                            const bpmStr = t.bpm ? `${Math.round(t.bpm)} BPM` : '';
+                            const energyStr = t.energy != null ? `E:${t.energy.toFixed(2)}` : '';
+                            const meta = [bpmStr, energyStr].filter(Boolean).join(' / ');
+                            out += `<div class="artist-item">
+                                <span><span class="artist-name">#${t.rank} ${escapeHtml(t.track_name)}</span> <span style="color:#555;font-size:11px;">— ${escapeHtml(t.artist_name)}</span></span>
+                                <span class="artist-genres">${escapeHtml(meta)}</span>
+                            </div>`;
+                        });
+                    }
+                    out += '</div></details>';
+                }
+
+                // 3. Followed Artists dropdown
+                if (s2.followed_artists && s2.followed_artists.length > 0) {
+                    out += `<details class="artist-dropdown" style="margin-top:8px;">`;
+                    out += `<summary style="cursor:pointer;font-size:12px;font-weight:600;color:#888;user-select:none;padding:6px 0;">FOLLOWED ARTISTS (${s2.followed_artists.length}) — click to expand</summary>`;
+                    out += '<div class="artist-list" style="margin-top:4px;">';
+                    s2.followed_artists.forEach(a => {
+                        let genres = '';
+                        try { genres = JSON.parse(a.genres || '[]').join(', '); } catch(e) { genres = a.genres || ''; }
+                        out += `<div class="artist-item">
+                            <span><span class="artist-name">${escapeHtml(a.name)}</span></span>
+                            <span class="artist-genres">${escapeHtml(genres) || 'no genres'}</span>
+                        </div>`;
+                    });
+                    out += '</div></details>';
+                }
+
+                // 4. Saved Tracks dropdown
+                if (s2.saved_tracks && s2.saved_tracks.length > 0) {
+                    out += `<details class="artist-dropdown" style="margin-top:8px;">`;
+                    out += `<summary style="cursor:pointer;font-size:12px;font-weight:600;color:#888;user-select:none;padding:6px 0;">SAVED TRACKS (${s2.saved_tracks.length}) — click to expand</summary>`;
+                    out += '<div class="artist-list" style="margin-top:4px;">';
+                    s2.saved_tracks.forEach(s => {
+                        const bpmStr = s.bpm ? `${Math.round(s.bpm)} BPM` : '';
+                        const energyStr = s.energy != null ? `E:${s.energy.toFixed(2)}` : '';
+                        const meta = [bpmStr, energyStr].filter(Boolean).join(' / ');
+                        const added = s.added_at ? s.added_at.split('T')[0] : '';
+                        out += `<div class="artist-item">
+                            <span><span class="artist-name">${escapeHtml(s.track_name)}</span> <span style="color:#555;font-size:11px;">— ${escapeHtml(s.artist_name)}</span></span>
+                            <span class="artist-genres">${escapeHtml(meta || added)}</span>
+                        </div>`;
+                    });
+                    out += '</div></details>';
+                }
+
+                // 5. Recent Plays dropdown
+                if (s2.recent_plays && s2.recent_plays.length > 0) {
+                    out += `<details class="artist-dropdown" style="margin-top:8px;">`;
+                    out += `<summary style="cursor:pointer;font-size:12px;font-weight:600;color:#888;user-select:none;padding:6px 0;">RECENT PLAYS (${s2.recent_plays.length}) — click to expand</summary>`;
+                    out += '<div class="artist-list" style="margin-top:4px;">';
+                    s2.recent_plays.forEach(r => {
+                        const when = r.played_at ? new Date(r.played_at).toLocaleString() : '';
+                        out += `<div class="artist-item">
+                            <span><span class="artist-name">${escapeHtml(r.track_name)}</span> <span style="color:#555;font-size:11px;">— ${escapeHtml(r.artist_name)}</span></span>
+                            <span class="artist-genres">${escapeHtml(when)}</span>
+                        </div>`;
+                    });
+                    out += '</div></details>';
+                }
+
+                return out;
+            });
+
+            // Stage 3: Taste Profile
+            const s3 = stages['3_taste_profile'] || {};
+            html += renderStage(3, 'Taste Profile', s3.status, () => {
+                let out = '';
+                const p = s3.profile || {};
+
+                if (s3.status !== 'computed') {
+                    out += 'No taste profile computed.';
+                    if (s3.reason) out += `<div style="margin-top:8px;color:#eab308;font-size:12px;">${escapeHtml(s3.reason)}</div>`;
+                }
+
+                // Source contribution bars — always show so user can toggle
+                const sourceLabels = {
+                    top_artists: 'Top Artists', top_tracks: 'Top Tracks',
+                    followed_artists: 'Followed Artists', saved_tracks: 'Saved Tracks',
+                    recent_plays: 'Recently Played',
+                };
+                const defaultWeights = { top_artists: 5, top_tracks: 4, followed_artists: 3, saved_tracks: 2, recent_plays: 1 };
+                const sourcesUsed = p.sources_used || [];
+                const excluded = p.excluded_sources || [];
+                const totalEffective = sourcesUsed.reduce((sum, s) => sum + s.effective_count, 0);
+
+                out += '<div style="margin-top:12px;font-size:12px;color:#888;font-weight:600;margin-bottom:8px;">DATA SOURCE CONTRIBUTIONS</div>';
+
+                ['top_artists', 'top_tracks', 'followed_artists', 'saved_tracks', 'recent_plays'].forEach(source => {
+                    const sd = sourcesUsed.find(s => s.source === source);
+                    const isExcluded = excluded.includes(source);
+                    const pct = sd && totalEffective > 0 ? Math.round((sd.effective_count / totalEffective) * 100) : 0;
+                    const genreCount = sd ? sd.genre_count : 0;
+                    const weight = sd ? sd.weight : defaultWeights[source];
+
+                    out += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;${isExcluded ? 'opacity:0.4;' : ''}">
+                        <button onclick="toggleSource('${source}', ${!isExcluded})"
+                            style="width:18px;height:18px;border-radius:4px;border:1px solid ${isExcluded ? '#ef4444' : '#22c55e'};
+                            background:${isExcluded ? '#ef444422' : '#22c55e22'};color:${isExcluded ? '#ef4444' : '#22c55e'};
+                            font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                            ${isExcluded ? '\u2715' : '\u2713'}
+                        </button>
+                        <span style="width:120px;font-size:13px;color:#fff;flex-shrink:0;">${sourceLabels[source]}</span>
+                        <span style="width:24px;font-size:11px;color:#888;text-align:right;flex-shrink:0;">\u00d7${weight}</span>
+                        <div style="flex:1;height:8px;background:#1e1e22;border-radius:4px;overflow:hidden;">
+                            <div style="width:${pct}%;height:100%;background:${isExcluded ? '#555' : '#22c55e'};border-radius:4px;transition:width 0.3s;"></div>
+                        </div>
+                        <span style="width:60px;font-size:11px;color:#888;text-align:right;flex-shrink:0;">${genreCount} genres</span>
+                        <span style="width:35px;font-size:11px;color:#888;text-align:right;flex-shrink:0;">${pct}%</span>
+                    </div>`;
+                });
+
+                if (totalEffective > 0) {
+                    out += `<div style="margin-top:4px;font-size:11px;color:#555;">${p.total_weighted_genres || 0} total weighted genre entries</div>`;
+                }
+
+                // Show computed taste values if we have data
+                if (s3.status === 'computed') {
+                    out += '<div style="margin-top:16px;font-size:12px;color:#888;font-weight:600;margin-bottom:8px;">COMPUTED TASTE</div>';
+                    const tasteGrid = [
+                        ['BPM', p.avg_bpm],
+                        ['BPM Range', p.bpm_range ? `${p.bpm_range[0]}-${p.bpm_range[1]}` : 'N/A'],
+                        ['Energy', `${p.energy} (${p.energy_raw})`],
+                        ['Mood', p.mood],
+                        ['Vocals', p.vocal_density],
+                        ['Key', p.key_tendency],
+                    ];
+                    out += '<div class="data-grid">';
+                    tasteGrid.forEach(([label, value]) => {
+                        out += `<div class="data-card"><div class="value" style="font-size:16px;">${escapeHtml(String(value ?? 'N/A'))}</div><div class="label">${escapeHtml(label)}</div></div>`;
+                    });
+                    out += '</div>';
+
+                    // Top genres
+                    if (p.top_genres && p.top_genres.length > 0) {
+                        out += '<div style="margin-top:12px;font-size:12px;color:#888;font-weight:600;margin-bottom:4px;">TOP GENRES</div>';
+                        out += '<div class="genre-tags">';
+                        p.top_genres.forEach(g => { out += `<span class="genre-tag">${escapeHtml(g)}</span>`; });
+                        out += '</div>';
+                    }
+
+                    // Stored in DB status
+                    out += `<div style="margin-top:8px;font-size:11px;color:#555;">Stored in DB: ${s3.stored_in_db ? 'yes' : 'no'}</div>`;
+                }
+
+                return out;
+            });
+
+            // Stage 4: Artist Research
+            const s4 = stages['4_artist_research'] || {};
+            html += renderStage(4, 'Production DNA Research', s4.status, () => {
+                if (s4.status === 'error') return `Error: ${escapeHtml(s4.error)}`;
+                if (s4.status === 'empty') return 'No artists researched yet. Production DNA not available.';
+
+                let out = `<div style="font-size:13px;color:#fff;">${s4.researched_artists} artists researched, ${s4.pending_in_queue} pending in queue</div>`;
+                if (s4.no_data_artists > 0) {
+                    const useful = s4.useful_research || 0;
+                    out += `<div style="margin-top:4px;font-size:12px;color:${useful > 0 ? '#eab308' : '#ef4444'};">${s4.no_data_artists}/${s4.researched_artists} returned "don't have specific data" — ${useful} have usable production profiles</div>`;
+                }
+                if (s4.sample_research && s4.sample_research.length > 0) {
+                    s4.sample_research.forEach(r => {
+                        out += `<div class="research-item">
+                            <div class="research-artist">${escapeHtml(r.artist)}</div>
+                            <div class="research-summary">${escapeHtml(r.summary_preview || 'No summary yet')}...</div>
+                        </div>`;
+                    });
+                }
+                return out;
+            });
+
+            // Stage 5: Artist Graph
+            const s5 = stages['5_artist_graph'] || {};
+            html += renderStage(5, 'Related Artists Graph', s5.status, () => {
+                if (s5.status === 'not_built') return 'Artist graph table not created yet. Run the Spotify audit prompt first.';
+                if (s5.status === 'empty') return 'Graph exists but has no edges. Related artists crawler has not run.';
+
+                let out = `<div style="font-size:13px;color:#fff;">${s5.total_edges} connections mapped</div>`;
+                if (s5.sample_connections && s5.sample_connections.length > 0) {
+                    out += '<div style="margin-top:8px;">';
+                    s5.sample_connections.forEach(edge => {
+                        const parts = edge.split(' \u2192 ');
+                        out += `<div class="graph-edge"><span>${escapeHtml(parts[0])}</span> \u2192 <span>${escapeHtml(parts[1] || '')}</span></div>`;
+                    });
+                    out += '</div>';
+                }
+                return out;
+            });
+
+            // Stage 6: System Prompt Injection
+            const s6 = stages['6_prompt_injection'] || {};
+            html += renderStage(6, 'System Prompt Injection', s6.status, () => {
+                if (s6.status === 'error') return `Error: ${escapeHtml(s6.error)}. The build_taste_context function may not exist yet.`;
+                if (s6.status === 'inactive') return 'No taste profile section is being injected into the system prompt.';
+
+                return `<div style="font-size:13px;color:#fff;margin-bottom:8px;">${s6.char_count} characters injected into system prompt</div>
+                    <div class="prompt-preview">${escapeHtml(s6.prompt_preview || 'empty')}</div>`;
+            });
+
+            // Stage 7: Generation Ready
+            const s7 = stages['7_generation_ready'] || {};
+            html += renderStage(7, 'Generation Influence', s7.status, () => {
+                return escapeHtml(s7.message || 'Unknown state');
+            });
+
+            // Overall health bar
+            const health = data.pipeline_health || {};
+            html += `<div style="margin-top:8px;padding:16px;background:#1a1a1e;border:1px solid #2a2a2e;border-radius:12px;text-align:center;">
+                <div style="font-size:32px;font-weight:700;color:${health.stages_working === 7 ? '#22c55e' : '#eab308'};">${health.stages_working}/7</div>
+                <div style="font-size:13px;color:#888;">pipeline stages operational</div>
+            </div>`;
+
+            container.innerHTML = html;
+        }
+
+        function renderStage(num, title, status, bodyFn) {
+            const cls = stageClass(status);
+            return `<div class="stage ${cls}">
+                <div class="stage-header">
+                    <div class="stage-number">${num}</div>
+                    <div class="stage-title">${escapeHtml(title)}</div>
+                    <div class="stage-status">${escapeHtml(status || 'unknown')}</div>
+                </div>
+                <div class="stage-body">${bodyFn()}</div>
+            </div>`;
+        }
+
+        async function toggleSource(source, exclude) {
+            try {
+                await fetch('/api/spotify/exclude-source', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ source, exclude })
+                });
+                loadDiagnostic();
+            } catch (err) {
+                alert('Failed to toggle source: ' + err.message);
+            }
+        }
+
+        async function testGeneration() {
+            const section = document.getElementById('test-section');
+            const output = document.getElementById('test-output');
+            section.style.display = 'block';
+            output.innerHTML = '<div class="loading">Sending test generation request...</div>';
+
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        messages: [{"role": "user", "content": "Generate a 4-bar bass pattern in the style that matches my listening taste. If you have my taste profile, reference it in your reasoning."}],
+                        session: {
+                            bpm: 128,
+                            key: "E",
+                            scale: "minor",
+                            tracks: "",
+                            notes: "DIAGNOSTIC TEST — checking taste profile influence"
+                        },
+                        genre: "tech_house",
+                        diagnostic: true
+                    })
+                });
+
+                const data = await res.json();
+
+                let html = '';
+
+                if (data.debug_system_prompt) {
+                    const hasProfile = data.debug_system_prompt.includes('LISTENER PROFILE') || data.debug_system_prompt.includes('PRODUCTION DNA');
+                    html += `<div class="test-label">System prompt taste injection</div>`;
+                    html += `<div style="margin-bottom:12px;font-size:13px;color:${hasProfile ? '#22c55e' : '#ef4444'};">${hasProfile ? 'TASTE PROFILE IS BEING INJECTED' : 'NO TASTE PROFILE FOUND IN SYSTEM PROMPT'}</div>`;
+
+                    const profileStart = data.debug_system_prompt.indexOf('LISTENER PROFILE');
+                    const dnaStart = data.debug_system_prompt.indexOf('PRODUCTION DNA');
+                    if (profileStart !== -1) {
+                        const profileEnd = dnaStart !== -1 ? data.debug_system_prompt.indexOf('\n\n', dnaStart + 100) : data.debug_system_prompt.indexOf('\n\n', profileStart + 100);
+                        const profileSection = data.debug_system_prompt.substring(profileStart, profileEnd !== -1 ? profileEnd : profileStart + 800);
+                        html += `<div class="prompt-preview">${escapeHtml(profileSection)}</div>`;
+                    }
+                }
+
+                html += `<div class="test-label" style="margin-top:16px;">AI Response</div>`;
+                html += `<pre>${escapeHtml(data.text || 'No text response')}</pre>`;
+
+                if (data.output) {
+                    html += `<div class="test-label" style="margin-top:16px;">Generated Output</div>`;
+                    html += `<pre>${escapeHtml(JSON.stringify(data.output, null, 2))}</pre>`;
+                }
+
+                if (data.file_url) {
+                    html += `<div style="margin-top:8px;"><a href="${escapeHtml(data.file_url)}" style="color:#22c55e;">Download MIDI</a></div>`;
+                }
+
+                output.innerHTML = html;
+
+            } catch (err) {
+                output.innerHTML = `<div style="color:#ef4444;">Test failed: ${escapeHtml(err.message)}</div>`;
+            }
+        }
+
+        loadDiagnostic();
+    </script>
+</body>
+</html>

@@ -202,3 +202,60 @@ def compute_taste_from_genres(genre_list):
         "top_genres": top_genres,
         "genre_count": len(genre_list),
     }
+
+
+# ── Weighted multi-source computation ──────────────────────────
+
+# Data source weights — higher = stronger taste signal
+SOURCE_WEIGHTS = {
+    "top_artists": 5,       # Algorithmic, listening-based — strongest
+    "top_tracks": 4,        # Artist genres from most-played tracks
+    "followed_artists": 3,  # Intentional curation
+    "saved_tracks": 2,      # Intentional saves
+    "recent_plays": 1,      # Small sample, current behavior
+}
+
+
+def compute_weighted_taste(genre_sources, excluded_sources=None):
+    """Compute a taste profile from multiple genre sources with priority weighting.
+
+    Args:
+        genre_sources: dict mapping source name to list of genre strings.
+        excluded_sources: list of source names to skip.
+
+    Returns:
+        Same format as compute_taste_from_genres, plus sources_used,
+        total_weighted_genres, and excluded_sources.
+    """
+    if excluded_sources is None:
+        excluded_sources = []
+
+    weighted_genres = []
+    sources_used = []
+
+    for source, genres in genre_sources.items():
+        if source in excluded_sources or not genres:
+            continue
+
+        weight = SOURCE_WEIGHTS.get(source, 1)
+        weighted_genres.extend([g for g in genres for _ in range(weight)])
+
+        sources_used.append({
+            "source": source,
+            "genre_count": len(genres),
+            "weight": weight,
+            "effective_count": len(genres) * weight,
+        })
+
+    if not weighted_genres:
+        result = compute_taste_from_genres([])
+        result["sources_used"] = []
+        result["total_weighted_genres"] = 0
+        result["excluded_sources"] = excluded_sources
+        return result
+
+    result = compute_taste_from_genres(weighted_genres)
+    result["sources_used"] = sources_used
+    result["total_weighted_genres"] = len(weighted_genres)
+    result["excluded_sources"] = excluded_sources
+    return result
