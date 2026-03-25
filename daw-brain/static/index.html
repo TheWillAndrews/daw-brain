@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DAW Brain</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <script>document.body.dataset.theme=localStorage.getItem('daw-brain-theme')||'dark'</script>
+  <div class="app">
+    <!-- Top Navigation -->
+    <nav class="top-nav">
+      <div class="top-nav-left">
+        <h1 class="logo">DAW BRAIN</h1>
+      </div>
+      <div class="top-nav-tabs">
+        <div class="top-nav-tab active" data-view="builder">Track Builder</div>
+        <div class="top-nav-tab" data-view="vocal-separator">Vocal Separator</div>
+      </div>
+      <div class="top-nav-right">
+        <div class="skill-level-pills" id="skill-level-pills">
+          <button class="skill-pill" data-level="novice">Novice</button>
+          <button class="skill-pill" data-level="intermediate">Intermediate</button>
+          <button class="skill-pill active" data-level="expert">Expert</button>
+        </div>
+        <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+          <svg class="theme-icon sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+          </svg>
+          <span class="theme-toggle-knob"></span>
+          <svg class="theme-icon moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+        </button>
+      </div>
+    </nav>
+
+    <!-- === BUILDER VIEW === -->
+    <div class="view active" id="builder-view">
+
+    <!-- Session State Bar -->
+    <header class="session-bar" id="session-bar">
+      <div class="session-bar-left">
+      </div>
+      <div class="session-bar-center">
+        <div class="session-control">
+          <label>BPM</label>
+          <input type="number" id="bpm" value="128" min="60" max="200">
+        </div>
+        <div class="session-control">
+          <label>Key</label>
+          <select id="key">
+            <option value="C">C</option>
+            <option value="C#">C#</option>
+            <option value="D">D</option>
+            <option value="Eb">Eb</option>
+            <option value="E" selected>E</option>
+            <option value="F">F</option>
+            <option value="F#">F#</option>
+            <option value="G">G</option>
+            <option value="Ab">Ab</option>
+            <option value="A">A</option>
+            <option value="Bb">Bb</option>
+            <option value="B">B</option>
+          </select>
+        </div>
+        <div class="session-control">
+          <label>Scale</label>
+          <select id="scale">
+            <option value="minor" selected>Minor</option>
+            <option value="major">Major</option>
+            <option value="dorian">Dorian</option>
+            <option value="phrygian">Phrygian</option>
+            <option value="mixolydian">Mixolydian</option>
+            <option value="harmonic minor">Harm. Min</option>
+          </select>
+        </div>
+        <div class="session-control">
+          <label>Genre</label>
+          <select id="genre"></select>
+        </div>
+        <div class="session-control track-count" id="track-count">
+          0/25 elements built
+        </div>
+      </div>
+      <div class="session-bar-right">
+        <p class="preset-desc" id="genre-desc"></p>
+      </div>
+    </header>
+
+    <!-- Main Content: Kanban + Outputs -->
+    <div class="kanban-area">
+      <!-- Kanban Columns -->
+      <div class="kanban-columns">
+        <!-- DRUMS -->
+        <div class="kanban-column" data-group="drums">
+          <div class="column-header column-drums">DRUMS</div>
+          <div class="column-elements">
+            <div class="element-card" data-element="kick">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Kick</span>
+            </div>
+            <div class="element-card" data-element="clap">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Clap / Snare</span>
+            </div>
+            <div class="element-card" data-element="hats">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Hats</span>
+            </div>
+            <div class="element-card" data-element="perc">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Percussion</span>
+            </div>
+            <div class="element-card" data-element="toploop">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Top Loops</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- BASS -->
+        <div class="kanban-column" data-group="bass">
+          <div class="column-header column-bass">BASS</div>
+          <div class="column-elements">
+            <div class="element-card" data-element="sub">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Sub Bass</span>
+            </div>
+            <div class="element-card" data-element="midbass">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Mid Bass</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- MELODIC -->
+        <div class="kanban-column" data-group="melodic">
+          <div class="column-header column-melodic">MELODIC</div>
+          <div class="column-elements">
+            <div class="element-card" data-element="stabs">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Stabs</span>
+            </div>
+            <div class="element-card" data-element="lead">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Lead</span>
+            </div>
+            <div class="element-card" data-element="chords">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Chords</span>
+            </div>
+            <div class="element-card" data-element="pad">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Pad</span>
+            </div>
+            <div class="element-card" data-element="arps">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Arps</span>
+            </div>
+            <div class="element-card" data-element="plucks">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Plucks</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- VOCALS -->
+        <div class="kanban-column" data-group="vocals">
+          <div class="column-header column-vocals">VOCALS</div>
+          <div class="column-elements">
+            <div class="element-card" data-element="mainvox">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Main Vocal</span>
+            </div>
+            <div class="element-card" data-element="chops">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Chops</span>
+            </div>
+            <div class="element-card" data-element="hook">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Hook</span>
+            </div>
+            <div class="element-card" data-element="adlibs">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Ad-libs</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- FX -->
+        <div class="kanban-column" data-group="fx">
+          <div class="column-header column-fx">FX</div>
+          <div class="column-elements">
+            <div class="element-card" data-element="risers">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Risers</span>
+            </div>
+            <div class="element-card" data-element="downlifters">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Downlifters</span>
+            </div>
+            <div class="element-card" data-element="impacts">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Impacts</span>
+            </div>
+            <div class="element-card" data-element="sweeps">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Sweeps</span>
+            </div>
+            <div class="element-card" data-element="transitions">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Transitions</span>
+            </div>
+            <div class="element-card" data-element="textures">
+              <span class="element-status" data-status="empty"></span>
+              <span class="element-name">Textures</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Generated Outputs Panel -->
+      <div class="outputs-panel">
+        <div class="outputs-header">Generated Outputs</div>
+        <div class="outputs-list" id="output-list">
+          <div class="outputs-empty">No outputs yet</div>
+        </div>
+        <button class="download-all-btn hidden" id="download-all-btn">Download All</button>
+        <button class="clear-session-btn" id="clear-session-btn">Clear Session</button>
+      </div>
+    </div>
+
+    <!-- Resize Handle -->
+    <div class="resize-handle" id="resize-handle">
+      <div class="resize-grip"></div>
+    </div>
+
+    <!-- Element Chat Area (bottom) -->
+    <div class="element-chat" id="element-chat">
+      <!-- Chat tab bar -->
+      <div class="chat-tab-bar">
+        <div class="chat-tab active" data-chat-tab="element" id="element-tab">
+          <span id="element-tab-label">Select an element above</span>
+        </div>
+        <div class="chat-tab" data-chat-tab="general">General</div>
+      </div>
+
+      <!-- Element Chat View -->
+      <div class="chat-panel active" id="element-chat-panel">
+        <div class="chat-messages" id="chat-messages">
+          <div class="starter-prompts" id="starters">
+            <p class="starter-hint">Click an element above to start building your track</p>
+          </div>
+        </div>
+        <div class="chat-input-area">
+          <div class="chat-input-row">
+            <textarea class="chat-input" id="chat-input" placeholder="Describe what you need..." rows="1"></textarea>
+            <button class="send-btn" id="send-btn">Send</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- General Chat View -->
+      <div class="chat-panel" id="general-chat-panel">
+        <div class="chat-messages" id="general-chat-messages">
+          <div class="starter-prompts" id="general-starters">
+            <h2>What are we making?</h2>
+            <div class="starter-prompt" data-prompt="Map out a 5-minute arrangement for a DJ-friendly track with intro, build, drop, breakdown, and outro.">DJ-friendly arrangement map</div>
+            <div class="starter-prompt" data-prompt="Give me a signal chain for a punchy, groovy bass sound using Ableton stock plugins.">Bass signal chain (stock plugins)</div>
+            <div class="starter-prompt" data-prompt="What's the best order to build elements for a tech house track?">Best element build order</div>
+            <div class="starter-prompt" data-prompt="How should I structure the energy arc for a 6-minute tech house track?">Energy arc structure</div>
+          </div>
+        </div>
+        <div class="chat-input-area">
+          <div class="chat-input-row">
+            <textarea class="chat-input" id="general-chat-input" placeholder="Ask anything about your track..." rows="1"></textarea>
+            <button class="send-btn" id="general-send-btn">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    </div><!-- end builder-view -->
+
+    <!-- === VOCAL SEPARATOR VIEW === -->
+    <div class="view" id="vocal-separator-view">
+      <div class="vocal-sep-container">
+
+        <!-- Upload State -->
+        <div class="vocal-sep-upload" id="vocal-upload-area">
+          <div class="vocal-sep-dropzone" id="vocal-dropzone">
+            <div class="dropzone-icon">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+            </div>
+            <p class="dropzone-text">Drop a track here to isolate vocals</p>
+            <p class="dropzone-hint">WAV, MP3, FLAC, M4A — max 50MB</p>
+            <button class="dropzone-browse" id="vocal-browse-btn">Browse Files</button>
+            <input type="file" id="vocal-file-input" accept=".wav,.mp3,.flac,.m4a" hidden>
+          </div>
+          <p class="dropzone-filename" id="vocal-filename"></p>
+          <button class="vocal-sep-go hidden" id="vocal-go-btn">Separate Vocals</button>
+        </div>
+
+        <!-- Processing State -->
+        <div class="vocal-sep-processing hidden" id="vocal-processing">
+          <div class="vocal-sep-spinner"></div>
+          <p class="vocal-sep-status">Isolating vocals... this may take several minutes on CPU</p>
+          <p class="vocal-sep-note">First run downloads the AI model (~100MB). Subsequent runs are faster.</p>
+        </div>
+
+        <!-- Results State -->
+        <div class="vocal-sep-results hidden" id="vocal-results">
+          <div class="vocal-stem-card">
+            <div class="stem-label">Vocals</div>
+            <audio controls class="stem-audio" id="vocal-audio"></audio>
+            <div class="stem-meta">
+              <span class="stem-size" id="vocal-size"></span>
+              <a class="download-btn stem-download" id="vocal-download" download>Download WAV</a>
+            </div>
+          </div>
+          <button class="vocal-sep-new" id="vocal-new-btn">Separate Another Track</button>
+        </div>
+
+        <!-- Error State -->
+        <div class="vocal-sep-error hidden" id="vocal-error">
+          <p class="vocal-error-msg" id="vocal-error-msg"></p>
+          <p class="vocal-error-hint">Make sure the file is a valid audio file under 50MB.</p>
+          <button class="vocal-sep-new" id="vocal-error-retry">Try Again</button>
+        </div>
+
+      </div>
+    </div><!-- end vocal-separator-view -->
+
+  </div>
+
+  <script src="/static/api.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

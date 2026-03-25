@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+outputs/
+outputs/stems/
+server.log
+.env
+*.onnx
+node_modules/
+.DS_Store

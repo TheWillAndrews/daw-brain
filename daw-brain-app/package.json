@@ -1,0 +1,44 @@
+{
+  "name": "daw-brain",
+  "productName": "DAW Brain",
+  "version": "1.0.0",
+  "description": "AI music production assistant for Ableton Live",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.dawbrain.app",
+    "mac": {
+      "category": "public.app-category.music",
+      "target": "dir",
+      "icon": "build/icon.icns"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "loading.html"
+    ],
+    "extraResources": [
+      {
+        "from": "backend/",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!__pycache__/**",
+          "!*.pyc",
+          "!outputs/**",
+          "!logs/**",
+          "!server.log",
+          "!.server.pid",
+          "!.server.log"
+        ]
+      }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^41.0.3",
+    "electron-builder": "^26.8.1"
+  }
+}
