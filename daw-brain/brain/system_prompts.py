@@ -1,5 +1,10 @@
+import json
+import logging
+
 from brain.presets import get_preset
 from brain.knowledge import load_knowledge, select_knowledge
+
+log = logging.getLogger("daw-brain")
 
 # Single source of truth for element display names
 ELEMENT_NAMES = {
@@ -71,9 +76,67 @@ SKILL_LEVEL_PROMPTS = {
 }
 
 
+def build_taste_context(user_id):
+    """Build the LISTENER PROFILE section from Spotify taste data.
+
+    Returns a formatted string for injection into the system prompt,
+    or empty string if no profile exists.
+    """
+    try:
+        from brain.database import get_taste_profile, get_user_top_artists
+    except ImportError:
+        return ""
+
+    profile = get_taste_profile(user_id)
+    if not profile:
+        return ""
+
+    # Parse top genres
+    top_genres_raw = profile.get("top_genres", "[]")
+    try:
+        top_genres = json.loads(top_genres_raw) if isinstance(top_genres_raw, str) else top_genres_raw
+    except (json.JSONDecodeError, TypeError):
+        top_genres = []
+
+    # Get short-term and long-term top artist names
+    short_artists = get_user_top_artists(user_id, "short_term")
+    long_artists = get_user_top_artists(user_id, "long_term")
+    short_names = ", ".join(a["artist_name"] for a in short_artists[:5]) if short_artists else "N/A"
+    long_names = ", ".join(a["artist_name"] for a in long_artists[:5]) if long_artists else "N/A"
+
+    ctx = f"""LISTENER PROFILE (from Spotify):
+Preferred BPM: {profile.get('preferred_bpm', 'N/A')} (range: {profile.get('bpm_range_low', '?')}-{profile.get('bpm_range_high', '?')})
+Preferred keys: {profile.get('preferred_keys', 'N/A')}
+Energy: {profile.get('energy_level', 'N/A')} ({profile.get('avg_energy', 0):.2f})
+Danceability: {profile.get('danceability_level', 'N/A')} ({profile.get('avg_danceability', 0):.2f})
+Mood: {profile.get('mood', 'N/A')} (valence: {profile.get('avg_valence', 0):.2f})
+Vocal preference: {profile.get('vocal_preference', 'N/A')} (instrumentalness: {profile.get('avg_instrumentalness', 0):.2f})
+Acousticness: {(profile.get('avg_acousticness') or 0):.2f}
+Loudness tendency: {(profile.get('avg_loudness') or 0):.1f} dB
+Top genres: {', '.join(top_genres[:10]) if top_genres else 'N/A'}
+Recent favorites: {short_names}
+All-time favorites: {long_names}
+Taste evolution: {profile.get('evolving_taste', 'N/A')}
+"""
+
+    # Add Production DNA if research is complete
+    dna = profile.get("production_dna")
+    if dna and profile.get("research_status") == "complete":
+        ctx += f"""
+PRODUCTION DNA (researched from favorite artists):
+{dna}
+"""
+
+    ctx += """
+Use this profile to passively shape all suggestions. Don't mention the profile or Spotify explicitly unless asked. Let it influence your decisions about tempo, key, mood, energy, drum patterns, bass design, sound palette, and arrangement style. When the user asks for something generic like "give me a bass pattern," use this DNA to make opinionated choices that match their taste.
+"""
+    return ctx
+
+
 def build_system_prompt(session, genre_id="tech_house", user_message="",
                         active_element=None, element_history=None,
-                        skill_level="expert"):
+                        skill_level="expert", musical_context="",
+                        session_id=None, user_id=None):
     preset = get_preset(genre_id)
 
     bpm = session.get("bpm", 128)
@@ -151,6 +214,38 @@ RESPONSE BEHAVIOR RULES (ALWAYS FOLLOW):
                 name = ELEMENT_NAMES.get(elem_id, elem_id)
                 prompt += f"- {name}: {info['summary']}\n"
             prompt += "\nConsider the existing elements when generating. New elements should complement what's already built — avoid rhythmic clashes, fill frequency gaps, and create call-and-response relationships.\n\n"
+
+    # Deep musical context — actual MIDI note data from generated elements
+    # If no frontend-provided context, try building from DB
+    if not musical_context and session_id:
+        try:
+            from brain.database import build_musical_context_from_db
+            musical_context = build_musical_context_from_db(
+                session_id, bpm, key, scale
+            )
+        except Exception:
+            pass
+
+    if musical_context:
+        prompt += """MUSICAL CONTEXT:
+The following elements have been generated in this session. Use this data to make musically informed decisions. Specifically:
+- Avoid rhythmic conflicts (don't place accents where another element already fills the space, unless layering is intentional)
+- Reinforce groove convergence points (if multiple elements accent the same position, that's a signature moment — preserve it)
+- Respect frequency ranges (don't generate content that competes in the same frequency band as existing elements)
+- Use complementary rhythms (if the kick is sparse at bar 2 beat 1, consider whether this element should fill or preserve that space)
+- Reference specific notes and positions from existing elements when explaining your decisions
+
+"""
+        prompt += musical_context + "\n"
+
+    # Spotify taste profile integration
+    if user_id:
+        try:
+            taste_ctx = build_taste_context(user_id)
+            if taste_ctx:
+                prompt += taste_ctx + "\n"
+        except Exception as e:
+            log.warning(f"Failed to build taste context: {e}")
 
     prompt += f"""{CORE_PRINCIPLES}
 

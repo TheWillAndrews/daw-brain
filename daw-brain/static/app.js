@@ -27,6 +27,7 @@ const ELEMENT_DEFS = {
 
 // === Session State ===
 const sessionState = {
+  sessionId: null,  // set after loading from API/DB
   bpm: 128,
   key: "E",
   scale: "minor",
@@ -92,92 +93,115 @@ function getCSSVar(name) {
 const STORAGE_KEY = "dawbrain_session";
 let _saveTimeout = null;
 let _sessionReady = false;
+let _saving = false;
+
+function buildSessionData() {
+  return {
+    sessionId: sessionState.sessionId,
+    bpm: parseInt($("#bpm").value) || 128,
+    key: $("#key").value,
+    scale: $("#scale").value,
+    genre: genreSelect.value,
+    skillLevel: sessionState.skillLevel,
+    activeElement: sessionState.activeElement,
+    activeChatTab: sessionState.activeChatTab,
+    elements: sessionState.elements,
+    generalMessages: sessionState.generalMessages,
+    generalOutputs: sessionState.generalOutputs,
+  };
+}
+
+function applySessionData(data) {
+  // Restore session settings to DOM
+  if (data.bpm) $("#bpm").value = data.bpm;
+  if (data.key) $("#key").value = data.key;
+  if (data.scale) $("#scale").value = data.scale;
+
+  // Restore skill level
+  if (data.skillLevel) {
+    sessionState.skillLevel = data.skillLevel;
+    localStorage.setItem("daw-brain-skill-level", data.skillLevel);
+    $$("#skill-level-pills .skill-pill").forEach((pill) => {
+      pill.classList.toggle("active", pill.dataset.level === data.skillLevel);
+    });
+  }
+
+  // Restore elements
+  const elements = data.elements || {};
+  Object.keys(elements).forEach((id) => {
+    if (sessionState.elements[id] && elements[id]) {
+      const saved = elements[id];
+      sessionState.elements[id] = {
+        status: saved.status || "empty",
+        chatHistory: Array.isArray(saved.chatHistory) ? saved.chatHistory : [],
+        outputs: Array.isArray(saved.outputs) ? saved.outputs : [],
+        summary: saved.summary || "",
+      };
+      updateElementStatus(id);
+    }
+  });
+
+  // Restore general chat
+  if (Array.isArray(data.generalMessages)) sessionState.generalMessages = data.generalMessages;
+  if (Array.isArray(data.generalOutputs)) sessionState.generalOutputs = data.generalOutputs;
+
+  // Render output list
+  renderOutputList();
+
+  // Render general chat messages
+  if (sessionState.generalMessages.length > 0) {
+    const starters = generalChatMessages.querySelector(".starter-prompts");
+    if (starters) starters.classList.add("hidden");
+    sessionState.generalMessages.forEach((msg) => {
+      appendMessageToContainer(
+        generalChatMessages, msg.role, msg.content,
+        msg._outputData || null, msg._fileUrl || null
+      );
+    });
+  }
+
+  // Restore active element and chat tab
+  if (data.activeElement && ELEMENT_DEFS[data.activeElement]) {
+    selectElement(data.activeElement);
+  }
+  if (data.activeChatTab) switchChatTab(data.activeChatTab);
+}
 
 function saveSession() {
   if (!_sessionReady) return;
   clearTimeout(_saveTimeout);
-  _saveTimeout = setTimeout(() => {
+  _saveTimeout = setTimeout(async () => {
+    const data = buildSessionData();
+
+    // Save to localStorage (fast cache)
     try {
-      const data = {
-        version: 1,
-        bpm: parseInt($("#bpm").value) || 128,
-        key: $("#key").value,
-        scale: $("#scale").value,
-        genre: genreSelect.value,
-        skillLevel: sessionState.skillLevel,
-        activeElement: sessionState.activeElement,
-        activeChatTab: sessionState.activeChatTab,
-        elements: sessionState.elements,
-        generalMessages: sessionState.generalMessages,
-        generalOutputs: sessionState.generalOutputs,
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: 1, ...data }));
     } catch (e) {
       // localStorage full or unavailable — fail silently
     }
+
+    // Save to API (source of truth)
+    if (_saving) return;
+    _saving = true;
+    try {
+      const result = await API.saveSessionState(data);
+      if (result && result.sessionId && !sessionState.sessionId) {
+        sessionState.sessionId = result.sessionId;
+      }
+    } catch (e) {
+      // API save failed — localStorage cache is still there
+    }
+    _saving = false;
   }, 500);
 }
 
-function loadSession() {
+function loadSessionFromLocalStorage() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const data = JSON.parse(raw);
     if (!data || typeof data !== "object" || !data.elements) return null;
-
-    // Restore session settings to DOM
-    if (data.bpm) $("#bpm").value = data.bpm;
-    if (data.key) $("#key").value = data.key;
-    if (data.scale) $("#scale").value = data.scale;
-
-    // Restore skill level
-    if (data.skillLevel) {
-      sessionState.skillLevel = data.skillLevel;
-      localStorage.setItem("daw-brain-skill-level", data.skillLevel);
-      $$("#skill-level-pills .skill-pill").forEach((pill) => {
-        pill.classList.toggle("active", pill.dataset.level === data.skillLevel);
-      });
-    }
-
-    // Restore elements
-    Object.keys(data.elements).forEach((id) => {
-      if (sessionState.elements[id] && data.elements[id]) {
-        const saved = data.elements[id];
-        sessionState.elements[id] = {
-          status: saved.status || "empty",
-          chatHistory: Array.isArray(saved.chatHistory) ? saved.chatHistory : [],
-          outputs: Array.isArray(saved.outputs) ? saved.outputs : [],
-          summary: saved.summary || "",
-        };
-        updateElementStatus(id);
-      }
-    });
-
-    // Restore general chat
-    if (Array.isArray(data.generalMessages)) sessionState.generalMessages = data.generalMessages;
-    if (Array.isArray(data.generalOutputs)) sessionState.generalOutputs = data.generalOutputs;
-
-    // Render output list
-    renderOutputList();
-
-    // Render general chat messages
-    if (sessionState.generalMessages.length > 0) {
-      const starters = generalChatMessages.querySelector(".starter-prompts");
-      if (starters) starters.classList.add("hidden");
-      sessionState.generalMessages.forEach((msg) => {
-        appendMessageToContainer(
-          generalChatMessages, msg.role, msg.content,
-          msg._outputData || null, msg._fileUrl || null
-        );
-      });
-    }
-
-    // Restore active element and chat tab
-    if (data.activeElement && ELEMENT_DEFS[data.activeElement]) {
-      selectElement(data.activeElement);
-    }
-    if (data.activeChatTab) switchChatTab(data.activeChatTab);
-
+    applySessionData(data);
     return { genre: data.genre };
   } catch (e) {
     localStorage.removeItem(STORAGE_KEY);
@@ -185,7 +209,27 @@ function loadSession() {
   }
 }
 
-function clearSession() {
+async function loadSession() {
+  // Try API first (database is source of truth)
+  try {
+    const data = await API.getActiveSession();
+    if (data && data.sessionId) {
+      sessionState.sessionId = data.sessionId;
+      applySessionData(data);
+      return { genre: data.genre };
+    }
+  } catch (e) {
+    // API not available — fall back to localStorage
+  }
+  return loadSessionFromLocalStorage();
+}
+
+async function clearSession() {
+  try {
+    await API.clearActiveSession();
+  } catch (e) {
+    // Continue with local clear even if API fails
+  }
   localStorage.removeItem(STORAGE_KEY);
   localStorage.removeItem("daw-brain-skill-level");
   location.reload();
@@ -743,6 +787,234 @@ function buildElementHistory() {
   return history;
 }
 
+// === Musical Context Builder (Deep Cross-Element Awareness) ===
+const DRUM_ELEMENTS = new Set(["kick", "clap", "hats", "perc", "toploop"]);
+const MELODIC_ELEMENTS = new Set(["sub", "midbass", "stabs", "lead", "chords", "pad", "arps", "plucks"]);
+
+const ELEMENT_FREQ_RANGES = {
+  kick: "Sub (30-60 Hz)", clap: "Mid (200-2000 Hz)", hats: "High (3-10 kHz)",
+  perc: "Mid-High (500-5000 Hz)", toploop: "High (2-8 kHz)",
+  sub: "Sub (30-80 Hz)", midbass: "Low-Mid (80-300 Hz)",
+  stabs: "Mid-High (300-5000 Hz)", lead: "Mid-High (500-8000 Hz)",
+  chords: "Mid (200-4000 Hz)", pad: "Mid (200-4000 Hz)",
+  arps: "Mid-High (500-8000 Hz)", plucks: "Mid-High (500-8000 Hz)",
+};
+
+const INTERVAL_NAMES = {
+  0: "P1", 1: "m2", 2: "M2", 3: "m3", 4: "M3", 5: "P4",
+  6: "TT", 7: "P5", 8: "m6", 9: "M6", 10: "m7", 11: "M7", 12: "P8",
+};
+
+function notePosition(start) {
+  const zeroIndexed = start - 1;
+  const bar = Math.floor(zeroIndexed / 4) + 1;
+  const beatInBar = zeroIndexed % 4;
+  const beat = Math.floor(beatInBar) + 1;
+  const frac = beatInBar - Math.floor(beatInBar);
+  const sub = Math.round(frac / 0.25) + 1;
+  return `${bar}.${beat}.${sub}`;
+}
+
+function buildRhythmSummary(notes) {
+  const subCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
+  const velocities = [];
+  notes.forEach((n) => {
+    const frac = (n.start - 1) % 1;
+    const sub = Math.round(frac / 0.25) + 1;
+    subCounts[sub] = (subCounts[sub] || 0) + 1;
+    velocities.push(n.velocity || 100);
+  });
+
+  const total = notes.length;
+  const parts = [];
+
+  if (subCounts[1] / total > 0.4) parts.push("Main hits on .1 positions (on-beat)");
+  else if (subCounts[1] > 0) parts.push("some on-beat hits (.1)");
+
+  if (subCounts[3] / total > 0.3) parts.push("strong .3 presence (offbeat)");
+  else if (subCounts[3] > 0) parts.push("some .3 hits (offbeat)");
+
+  if (subCounts[2] > 0 || subCounts[4] > 0) {
+    const sixteenthCount = subCounts[2] + subCounts[4];
+    if (sixteenthCount / total > 0.3) parts.push("16th note movement (.2/.4)");
+    else if (sixteenthCount > 0) parts.push("occasional 16th fills");
+  }
+
+  const avgVel = Math.round(velocities.reduce((a, b) => a + b, 0) / velocities.length);
+  const minVel = Math.min(...velocities);
+  const maxVel = Math.max(...velocities);
+  if (maxVel - minVel < 10) {
+    parts.push(`flat velocity ~${avgVel}`);
+  } else {
+    const ghostThreshold = avgVel * 0.7;
+    const ghostCount = velocities.filter((v) => v < ghostThreshold).length;
+    if (ghostCount > 0) {
+      parts.push(`ghost hits at ~${Math.round((minVel / maxVel) * 100)}% velocity`);
+    } else {
+      parts.push(`velocity range ${minVel}-${maxVel}`);
+    }
+  }
+
+  return parts.join(", ");
+}
+
+function barsFromNotes(notes) {
+  if (!notes.length) return 0;
+  const maxBeat = Math.max(...notes.map((n) => n.start + (n.duration || 0.25)));
+  return Math.ceil((maxBeat - 1) / 4);
+}
+
+function collapseRepeatedBars(notes, totalBars) {
+  if (totalBars <= 2) return null;
+
+  const barNotes = {};
+  for (let b = 1; b <= totalBars; b++) barNotes[b] = [];
+  notes.forEach((n) => {
+    const bar = Math.floor((n.start - 1) / 4) + 1;
+    if (barNotes[bar]) barNotes[bar].push(n);
+  });
+
+  function barFingerprint(barNum) {
+    return (barNotes[barNum] || [])
+      .map((n) => {
+        const relStart = ((n.start - 1) % 4).toFixed(3);
+        return `${relStart}:${n.pitch}:${n.velocity}`;
+      })
+      .sort()
+      .join("|");
+  }
+
+  const fingerprints = {};
+  const repeats = {};
+  for (let b = 1; b <= totalBars; b++) {
+    const fp = barFingerprint(b);
+    if (fingerprints[fp] !== undefined) {
+      repeats[b] = fingerprints[fp];
+    } else {
+      fingerprints[fp] = b;
+    }
+  }
+  return Object.keys(repeats).length > 0 ? repeats : null;
+}
+
+function buildMusicalContext(elements) {
+  const bpm = parseInt(document.getElementById("bpm").value) || 128;
+  const key = document.getElementById("key").value || "C";
+  const scale = document.getElementById("scale").value || "minor";
+
+  const blocks = [];
+
+  Object.entries(elements).forEach(([elemId, elem]) => {
+    if (!elem.outputs || elem.outputs.length === 0) return;
+    if (!["in_progress", "complete"].includes(elem.status)) return;
+
+    // Use the most recent MIDI output with notes
+    const midiOutput = [...elem.outputs]
+      .reverse()
+      .find((o) => o.type === "midi" && Array.isArray(o.notes) && o.notes.length > 0);
+    if (!midiOutput) return;
+
+    const notes = midiOutput.notes;
+    const isDrum = DRUM_ELEMENTS.has(elemId);
+    const isMelodic = MELODIC_ELEMENTS.has(elemId);
+    const totalBars = barsFromNotes(notes);
+
+    const pitchSet = new Set(notes.map((n) => n.pitch));
+    const pitchNames = [...pitchSet]
+      .sort((a, b) => a - b)
+      .map((p) => `${midiNoteName(p)}(${p})`);
+
+    let block = `[ELEMENT: ${elemId}]\n`;
+    block += `Bars: ${totalBars} | BPM: ${bpm}`;
+    if (isMelodic) block += ` | Key: ${key} ${scale}`;
+    block += ` | Notes: ${notes.length}\n`;
+    block += `Pitches${isMelodic ? " used" : ""}: ${pitchNames.join(", ")}\n`;
+
+    // Sort notes by start time
+    const sorted = [...notes].sort((a, b) => a.start - b.start);
+    let patternNotes = sorted;
+
+    // For drums, collapse repeated bars
+    const repeats = isDrum ? collapseRepeatedBars(sorted, totalBars) : null;
+    let repeatNote = "";
+    if (repeats) {
+      const repeatedBars = new Set(Object.keys(repeats).map(Number));
+      patternNotes = sorted.filter((n) => {
+        const bar = Math.floor((n.start - 1) / 4) + 1;
+        return !repeatedBars.has(bar);
+      });
+      const bySource = {};
+      Object.entries(repeats).forEach(([repBar, srcBar]) => {
+        if (!bySource[srcBar]) bySource[srcBar] = [];
+        bySource[srcBar].push(repBar);
+      });
+      const repeatParts = Object.entries(bySource).map(
+        ([src, reps]) => `bar ${reps.join(", ")} = bar ${src}`
+      );
+      repeatNote = `  (Repeats: ${repeatParts.join("; ")})\n`;
+    }
+
+    // Cap at 32 notes — show first 16 + ... + last 16
+    let truncated = false;
+    if (patternNotes.length > 32) {
+      const first16 = patternNotes.slice(0, 16);
+      const last16 = patternNotes.slice(-16);
+      patternNotes = [...first16, null, ...last16];
+      truncated = true;
+    }
+
+    block += "Pattern:\n";
+    patternNotes.forEach((n) => {
+      if (n === null) {
+        block += "  ...\n";
+      } else {
+        block += `  ${notePosition(n.start)} → ${midiNoteName(n.pitch)} @ ${n.velocity || 100}\n`;
+      }
+    });
+    if (repeatNote) block += repeatNote;
+
+    block += `Rhythm summary: ${buildRhythmSummary(notes)}\n`;
+
+    const freqRange = ELEMENT_FREQ_RANGES[elemId];
+    if (freqRange) block += `Frequency range: ${freqRange}\n`;
+
+    // Melodic-specific: note lengths, pitch center, intervals
+    if (isMelodic && pitchSet.size > 1) {
+      const durations = notes.map((n) => n.duration || 0.25);
+      const avgDur = durations.reduce((a, b) => a + b, 0) / durations.length;
+      let durChar;
+      if (avgDur >= 0.9) durChar = "legato";
+      else if (avgDur >= 0.45) durChar = "~85% grid (legato gapped)";
+      else if (avgDur >= 0.2) durChar = "staccato";
+      else durChar = "very short";
+      block += `Note lengths: ${durChar}\n`;
+
+      const pitchCounts = {};
+      notes.forEach((n) => {
+        pitchCounts[n.pitch] = (pitchCounts[n.pitch] || 0) + 1;
+      });
+      const centerPitch = Number(
+        Object.entries(pitchCounts).sort((a, b) => b[1] - a[1])[0][0]
+      );
+      block += `Pitch center: ${midiNoteName(centerPitch)} (gravity note)\n`;
+
+      const intervals = [];
+      for (let i = 1; i < sorted.length; i++) {
+        const semitones = Math.abs(sorted[i].pitch - sorted[i - 1].pitch) % 12;
+        const name = INTERVAL_NAMES[semitones];
+        if (name && !intervals.includes(name)) intervals.push(name);
+      }
+      if (intervals.length > 0) {
+        block += `Intervals used: ${intervals.join(", ")}\n`;
+      }
+    }
+
+    blocks.push(block);
+  });
+
+  return blocks.length > 0 ? blocks.join("\n") : "";
+}
+
 // === Send Element Message ===
 async function sendElementMessage(text) {
   if (!text.trim() || sessionState.loading) return;
@@ -779,13 +1051,16 @@ async function sendElementMessage(text) {
       content: m.content,
     }));
 
+    const musicalContext = buildMusicalContext(sessionState.elements);
     const result = await API.chat(
       apiMessages,
       getSession(),
       getGenre(),
       elementId,
       buildElementHistory(),
-      sessionState.skillLevel
+      sessionState.skillLevel,
+      musicalContext,
+      sessionState.sessionId
     );
     hideLoading();
 
@@ -849,13 +1124,16 @@ async function sendGeneralMessage(text) {
       content: m.content,
     }));
 
+    const musicalContext = buildMusicalContext(sessionState.elements);
     const result = await API.chat(
       apiMessages,
       getSession(),
       getGenre(),
       null,
       buildElementHistory(),
-      sessionState.skillLevel
+      sessionState.skillLevel,
+      musicalContext,
+      sessionState.sessionId
     );
     hideLoading();
 
@@ -1216,25 +1494,118 @@ $$(".top-nav-tab").forEach((tab) => {
   });
 })();
 
+// === Spotify Integration ===
+async function checkSpotifyStatus() {
+  try {
+    const status = await API.getSpotifyStatus();
+    const connectBtn = $("#spotify-connect-btn");
+    const connectedNav = $("#spotify-connected-nav");
+
+    if (status.connected) {
+      connectBtn.classList.add("hidden");
+      connectedNav.classList.remove("hidden");
+      $("#spotify-nav-user").textContent = status.display_name || "";
+      sessionState.spotifyProfile = status;
+    } else {
+      connectBtn.classList.remove("hidden");
+      connectedNav.classList.add("hidden");
+      sessionState.spotifyProfile = null;
+    }
+  } catch (e) {
+    // Spotify status endpoint not available — keep defaults
+  }
+}
+
 // === Init ===
-const _savedSession = loadSession();
-loadPresets().then(() => {
+(async function init() {
+  sendBtn.classList.add("dimmed");
+  generalSendBtn.classList.add("dimmed");
+
+  const _savedSession = await loadSession();
+  await loadPresets();
   if (_savedSession && _savedSession.genre) {
     genreSelect.value = _savedSession.genre;
     updatePresetDesc();
   }
-}).finally(() => {
   _sessionReady = true;
-});
-updateTrackCount();
-sendBtn.classList.add("dimmed");
-generalSendBtn.classList.add("dimmed");
+  updateTrackCount();
+
+  // Check Spotify status (non-blocking)
+  checkSpotifyStatus();
+})();
 
 // Persist on session settings change
 $("#bpm").addEventListener("change", saveSession);
 $("#key").addEventListener("change", saveSession);
 $("#scale").addEventListener("change", saveSession);
 genreSelect.addEventListener("change", saveSession);
+
+// Download All — zip bundle
+$("#download-all-btn").addEventListener("click", async () => {
+  const bpm = parseInt($("#bpm").value) || 128;
+  const allOutputs = [];
+
+  Object.entries(sessionState.elements).forEach(([id, elem]) => {
+    elem.outputs.forEach((o) => {
+      if (o.type === "midi" && Array.isArray(o.notes) && o.notes.length > 0) {
+        allOutputs.push({ ...o, element: id });
+      }
+    });
+  });
+  sessionState.generalOutputs.forEach((o) => {
+    if (o.type === "midi" && Array.isArray(o.notes) && o.notes.length > 0) {
+      allOutputs.push(o);
+    }
+  });
+
+  if (allOutputs.length === 0) return;
+
+  const zip = new JSZip();
+  const fileLines = [];
+
+  allOutputs.forEach((o) => {
+    const bars = barsFromNotes(o.notes);
+    const elemName = o.element || "general";
+    const filename = `${elemName}_${bars}bar.mid`;
+    const blob = generateMidiBlob(o.notes, bpm);
+    zip.file(filename, blob);
+
+    const vels = o.notes.map((n) => n.velocity || 100);
+    const minVel = Math.min(...vels);
+    const maxVel = Math.max(...vels);
+    fileLines.push(`- ${filename} (${o.notes.length} notes, vel ${minVel}-${maxVel})`);
+  });
+
+  const keyVal = $("#key").value || "C";
+  const scaleVal = $("#scale").value || "minor";
+  const scaleCap = scaleVal.charAt(0).toUpperCase() + scaleVal.slice(1);
+  const genre = genreSelect.options[genreSelect.selectedIndex]?.text || "Tech House";
+  const skillCap = sessionState.skillLevel.charAt(0).toUpperCase() + sessionState.skillLevel.slice(1);
+  const today = new Date().toISOString().split("T")[0];
+
+  const sessionInfo = `BeatBrain Session Export
+Date: ${today}
+BPM: ${bpm}
+Key: ${keyVal} ${scaleCap}
+Genre: ${genre}
+Skill Level: ${skillCap}
+
+Included Files:
+${fileLines.join("\n")}
+`;
+
+  zip.file("session_info.txt", sessionInfo);
+
+  const zipBlob = await zip.generateAsync({ type: "blob" });
+  const url = URL.createObjectURL(zipBlob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `BeatBrain_Session_${today}.zip`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
 
 // Clear session
 $("#clear-session-btn").addEventListener("click", clearSession);
