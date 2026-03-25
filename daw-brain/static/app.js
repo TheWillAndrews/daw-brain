@@ -1516,6 +1516,55 @@ async function checkSpotifyStatus() {
   }
 }
 
+// === Spotify Disconnect ===
+$("#spotify-disconnect-btn").addEventListener("click", async () => {
+  try {
+    await API.disconnectSpotify();
+  } catch (e) {
+    window.location.href = "/api/spotify/disconnect";
+    return;
+  }
+  $("#spotify-connect-btn").classList.remove("hidden");
+  $("#spotify-connected-nav").classList.add("hidden");
+  $("#spotify-nav-user").textContent = "";
+  sessionState.spotifyProfile = null;
+});
+
+// === SoundCloud Integration ===
+async function checkSoundCloudStatus() {
+  try {
+    const status = await API.getSoundCloudStatus();
+    const connectBtn = $("#soundcloud-connect-btn");
+    const connectedNav = $("#soundcloud-connected-nav");
+
+    if (status.connected) {
+      connectBtn.classList.add("hidden");
+      connectedNav.classList.remove("hidden");
+      $("#soundcloud-nav-user").textContent = status.display_name || "";
+      sessionState.soundcloudProfile = status;
+    } else {
+      connectBtn.classList.remove("hidden");
+      connectedNav.classList.add("hidden");
+      sessionState.soundcloudProfile = null;
+    }
+  } catch (e) {
+    // SoundCloud status endpoint not available — keep defaults
+  }
+}
+
+// === SoundCloud Disconnect ===
+$("#soundcloud-disconnect-btn").addEventListener("click", async () => {
+  try {
+    await API.disconnectSoundCloud();
+  } catch (e) {
+    return;
+  }
+  $("#soundcloud-connect-btn").classList.remove("hidden");
+  $("#soundcloud-connected-nav").classList.add("hidden");
+  $("#soundcloud-nav-user").textContent = "";
+  sessionState.soundcloudProfile = null;
+});
+
 // === Init ===
 (async function init() {
   sendBtn.classList.add("dimmed");
@@ -1530,8 +1579,9 @@ async function checkSpotifyStatus() {
   _sessionReady = true;
   updateTrackCount();
 
-  // Check Spotify status (non-blocking)
+  // Check service statuses (non-blocking)
   checkSpotifyStatus();
+  checkSoundCloudStatus();
 })();
 
 // Persist on session settings change

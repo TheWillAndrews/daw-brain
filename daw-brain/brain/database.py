@@ -84,6 +84,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     spotify_id        TEXT UNIQUE,
+    soundcloud_id     TEXT UNIQUE,
     display_name      TEXT,
     email             TEXT,
     avatar_url        TEXT,
@@ -230,6 +231,163 @@ CREATE TABLE IF NOT EXISTS artist_research_cache (
     updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS soundcloud_tokens (
+    user_id           INTEGER PRIMARY KEY REFERENCES users(id),
+    access_token      TEXT NOT NULL,
+    refresh_token     TEXT NOT NULL,
+    token_expiry      TIMESTAMP,
+    last_refreshed    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS soundcloud_likes (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER REFERENCES users(id),
+    track_id          TEXT,
+    track_title       TEXT,
+    artist_name       TEXT,
+    artist_id         TEXT,
+    genre             TEXT,
+    tag_list          TEXT,
+    duration_ms       INTEGER,
+    playback_count    INTEGER,
+    likes_count       INTEGER,
+    reposts_count     INTEGER,
+    created_at_sc     TEXT,
+    liked_at          TIMESTAMP,
+    fetched_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS soundcloud_followings (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER REFERENCES users(id),
+    artist_id         TEXT,
+    artist_name       TEXT,
+    artist_permalink  TEXT,
+    followers_count   INTEGER,
+    track_count       INTEGER,
+    genre             TEXT,
+    city              TEXT,
+    country           TEXT,
+    fetched_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS soundcloud_reposts (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER REFERENCES users(id),
+    track_id          TEXT,
+    track_title       TEXT,
+    artist_name       TEXT,
+    artist_id         TEXT,
+    genre             TEXT,
+    tag_list          TEXT,
+    reposted_at       TIMESTAMP,
+    fetched_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS soundcloud_playlists (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER REFERENCES users(id),
+    playlist_id       TEXT,
+    playlist_title    TEXT,
+    description       TEXT,
+    genre             TEXT,
+    tag_list          TEXT,
+    track_count       INTEGER,
+    is_public         BOOLEAN,
+    created_at_sc     TEXT,
+    fetched_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS soundcloud_user_tracks (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER REFERENCES users(id),
+    track_id          TEXT,
+    track_title       TEXT,
+    genre             TEXT,
+    tag_list          TEXT,
+    bpm               REAL,
+    key_signature     TEXT,
+    duration_ms       INTEGER,
+    playback_count    INTEGER,
+    likes_count       INTEGER,
+    created_at_sc     TEXT,
+    fetched_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS soundcloud_taste_profiles (
+    user_id           INTEGER PRIMARY KEY REFERENCES users(id),
+    top_genres        TEXT,
+    top_tags          TEXT,
+    top_artists       TEXT,
+    underground_score REAL,
+    avg_bpm           REAL,
+    preferred_keys    TEXT,
+    mood              TEXT,
+    energy_level      TEXT,
+    vocal_preference  TEXT,
+    production_dna    TEXT,
+    research_status   TEXT DEFAULT 'pending',
+    evolving_taste    TEXT,
+    raw_data          TEXT,
+    last_updated      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS followed_artists (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER NOT NULL REFERENCES users(id),
+    spotify_id        TEXT NOT NULL,
+    name              TEXT NOT NULL,
+    genres            TEXT,
+    images            TEXT,
+    collected_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, spotify_id)
+);
+
+CREATE TABLE IF NOT EXISTS genre_profiles (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    genre_name        TEXT UNIQUE NOT NULL,
+    bpm_low           INTEGER,
+    bpm_high          INTEGER,
+    energy            REAL,
+    mood              TEXT,
+    vocal_density     TEXT,
+    key_tendency      TEXT,
+    description       TEXT,
+    key_artists       TEXT,
+    source            TEXT DEFAULT 'lookup_table',
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS artist_graph (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_artist_id  TEXT NOT NULL,
+    related_artist_id TEXT NOT NULL,
+    source_name       TEXT,
+    related_name      TEXT,
+    crawled_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_artist_id, related_artist_id)
+);
+
+CREATE TABLE IF NOT EXISTS research_queue (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER,
+    spotify_id        TEXT NOT NULL,
+    artist_name       TEXT NOT NULL,
+    priority          INTEGER DEFAULT 0,
+    status            TEXT DEFAULT 'pending',
+    queued_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at      TIMESTAMP,
+    UNIQUE(spotify_id)
+);
+
+CREATE TABLE IF NOT EXISTS trend_snapshots (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_type     TEXT NOT NULL,
+    data              TEXT NOT NULL,
+    captured_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id           INTEGER REFERENCES users(id),
@@ -334,6 +492,14 @@ def init_db():
     os.makedirs(DB_DIR, exist_ok=True)
     with get_connection() as conn:
         conn.executescript(SCHEMA)
+        # Migration: add soundcloud_id column if missing (for pre-SoundCloud DBs)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+        if "soundcloud_id" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN soundcloud_id TEXT")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_soundcloud_id "
+                "ON users(soundcloud_id) WHERE soundcloud_id IS NOT NULL"
+            )
     log.info(f"Database initialized at {DB_PATH}")
 
 
@@ -352,20 +518,21 @@ def ensure_default_user():
 
 # ─── Users ─────────────────────────────────────────────────────
 
-def create_user(spotify_id=None, display_name=None, email=None,
-                avatar_url=None, spotify_country=None, spotify_product=None,
-                skill_level="expert", preferred_genre="tech_house",
-                preferred_bpm=128, preferred_key="E", preferred_scale="minor",
-                theme="dark"):
+def create_user(spotify_id=None, soundcloud_id=None, display_name=None,
+                email=None, avatar_url=None, spotify_country=None,
+                spotify_product=None, skill_level="expert",
+                preferred_genre="tech_house", preferred_bpm=128,
+                preferred_key="E", preferred_scale="minor", theme="dark"):
     with get_connection() as conn:
         cursor = conn.execute(
-            """INSERT INTO users (spotify_id, display_name, email, avatar_url,
-               spotify_country, spotify_product, skill_level, preferred_genre,
-               preferred_bpm, preferred_key, preferred_scale, theme)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (spotify_id, display_name, email, avatar_url, spotify_country,
-             spotify_product, skill_level, preferred_genre, preferred_bpm,
-             preferred_key, preferred_scale, theme)
+            """INSERT INTO users (spotify_id, soundcloud_id, display_name,
+               email, avatar_url, spotify_country, spotify_product,
+               skill_level, preferred_genre, preferred_bpm, preferred_key,
+               preferred_scale, theme)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (spotify_id, soundcloud_id, display_name, email, avatar_url,
+             spotify_country, spotify_product, skill_level, preferred_genre,
+             preferred_bpm, preferred_key, preferred_scale, theme)
         )
         return cursor.lastrowid
 
@@ -380,6 +547,14 @@ def get_user_by_spotify_id(spotify_id):
     with get_connection() as conn:
         row = conn.execute(
             "SELECT * FROM users WHERE spotify_id = ?", (spotify_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def get_user_by_soundcloud_id(soundcloud_id):
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE soundcloud_id = ?", (soundcloud_id,)
         ).fetchone()
         return _row_to_dict(row)
 
@@ -682,6 +857,119 @@ def get_user_recent_plays(user_id):
         return _rows_to_dicts(rows)
 
 
+def save_followed_artists(user_id, artists_list):
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM followed_artists WHERE user_id = ?", (user_id,)
+        )
+        for artist in artists_list:
+            conn.execute(
+                """INSERT OR IGNORE INTO followed_artists
+                   (user_id, spotify_id, name, genres, images)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (user_id, artist.get("id"), artist.get("name"),
+                 json.dumps(artist.get("genres", [])),
+                 json.dumps(artist.get("images") or []))
+            )
+
+
+def get_followed_artists(user_id):
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM followed_artists WHERE user_id = ?",
+            (user_id,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def get_all_genres_for_user(user_id):
+    """Pull all genre tags from top_artists + followed_artists for taste profiling."""
+    all_genres = []
+    with get_connection() as conn:
+        # Top artists (weighted: short_term genres appear 3x, medium 2x, long 1x)
+        for time_range, weight in [("short_term", 3), ("medium_term", 2), ("long_term", 1)]:
+            rows = conn.execute(
+                """SELECT genres FROM spotify_top_artists
+                   WHERE user_id = ? AND time_range = ?""",
+                (user_id, time_range)
+            ).fetchall()
+            for row in rows:
+                try:
+                    genres = json.loads(row["genres"]) if row["genres"] else []
+                except (json.JSONDecodeError, TypeError):
+                    genres = []
+                all_genres.extend(genres * weight)
+
+        # Followed artists (weight 1x each)
+        rows = conn.execute(
+            "SELECT genres FROM followed_artists WHERE user_id = ?",
+            (user_id,)
+        ).fetchall()
+        for row in rows:
+            try:
+                genres = json.loads(row["genres"]) if row["genres"] else []
+            except (json.JSONDecodeError, TypeError):
+                genres = []
+            all_genres.extend(genres)
+
+    return all_genres
+
+
+def save_artist_edge(edge_data):
+    """Save a relationship edge in the artist graph."""
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO artist_graph
+               (source_artist_id, related_artist_id, source_name, related_name)
+               VALUES (?, ?, ?, ?)""",
+            (edge_data.get("source_artist_id"),
+             edge_data.get("related_artist_id"),
+             edge_data.get("source_name"),
+             edge_data.get("related_name"))
+        )
+
+
+def get_artist_graph_edges(user_id=None):
+    """Get all artist graph edges. Optionally filter by user's top artist IDs."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM artist_graph ORDER BY crawled_at DESC"
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def queue_for_research(spotify_id, artist_name, user_id=None, priority=0):
+    """Add an artist to the research queue if not already there."""
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO research_queue
+               (user_id, spotify_id, artist_name, priority)
+               VALUES (?, ?, ?, ?)""",
+            (user_id, spotify_id, artist_name, priority)
+        )
+
+
+def get_research_queue(status="pending", limit=20):
+    """Get pending items from the research queue."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """SELECT * FROM research_queue WHERE status = ?
+               ORDER BY priority DESC, queued_at ASC LIMIT ?""",
+            (status, limit)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def artist_in_research_cache(artist_name):
+    """Check if an artist is already in the research cache."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM artist_research_cache WHERE artist_name = ? COLLATE NOCASE",
+            (artist_name,)
+        ).fetchone()
+        return row is not None
+
+
 def clear_spotify_data(user_id):
     """Clear all Spotify listening data for a user (not artist_research_cache)."""
     with get_connection() as conn:
@@ -696,6 +984,9 @@ def clear_spotify_data(user_id):
         )
         conn.execute(
             "DELETE FROM spotify_top_artists WHERE user_id = ?", (user_id,)
+        )
+        conn.execute(
+            "DELETE FROM followed_artists WHERE user_id = ?", (user_id,)
         )
 
 
@@ -736,6 +1027,260 @@ def save_production_dna(user_id, dna_text):
                research_status = 'complete',
                last_updated = CURRENT_TIMESTAMP WHERE user_id = ?""",
             (dna_text, user_id)
+        )
+
+
+# ─── SoundCloud Tokens ────────────────────────────────────────
+
+def save_soundcloud_tokens(user_id, access_token, refresh_token, expiry):
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO soundcloud_tokens
+               (user_id, access_token, refresh_token, token_expiry,
+                last_refreshed)
+               VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+            (user_id, access_token, refresh_token, expiry)
+        )
+
+
+def get_soundcloud_tokens(user_id):
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM soundcloud_tokens WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+# ─── SoundCloud Data ──────────────────────────────────────────
+
+def save_soundcloud_likes(user_id, likes_list):
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM soundcloud_likes WHERE user_id = ?", (user_id,)
+        )
+        for like in likes_list:
+            conn.execute(
+                """INSERT INTO soundcloud_likes
+                   (user_id, track_id, track_title, artist_name, artist_id,
+                    genre, tag_list, duration_ms, playback_count, likes_count,
+                    reposts_count, created_at_sc, liked_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (user_id, like.get("track_id"), like.get("track_title"),
+                 like.get("artist_name"), like.get("artist_id"),
+                 like.get("genre"), like.get("tag_list"),
+                 like.get("duration_ms"), like.get("playback_count"),
+                 like.get("likes_count"), like.get("reposts_count"),
+                 like.get("created_at_sc"), like.get("liked_at"))
+            )
+
+
+def save_soundcloud_followings(user_id, followings_list):
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM soundcloud_followings WHERE user_id = ?", (user_id,)
+        )
+        for f in followings_list:
+            conn.execute(
+                """INSERT INTO soundcloud_followings
+                   (user_id, artist_id, artist_name, artist_permalink,
+                    followers_count, track_count, genre, city, country)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (user_id, f.get("artist_id"), f.get("artist_name"),
+                 f.get("artist_permalink"), f.get("followers_count"),
+                 f.get("track_count"), f.get("genre"),
+                 f.get("city"), f.get("country"))
+            )
+
+
+def save_soundcloud_reposts(user_id, reposts_list):
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM soundcloud_reposts WHERE user_id = ?", (user_id,)
+        )
+        for r in reposts_list:
+            conn.execute(
+                """INSERT INTO soundcloud_reposts
+                   (user_id, track_id, track_title, artist_name, artist_id,
+                    genre, tag_list, reposted_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (user_id, r.get("track_id"), r.get("track_title"),
+                 r.get("artist_name"), r.get("artist_id"),
+                 r.get("genre"), r.get("tag_list"), r.get("reposted_at"))
+            )
+
+
+def save_soundcloud_playlists(user_id, playlists_list):
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM soundcloud_playlists WHERE user_id = ?", (user_id,)
+        )
+        for p in playlists_list:
+            conn.execute(
+                """INSERT INTO soundcloud_playlists
+                   (user_id, playlist_id, playlist_title, description,
+                    genre, tag_list, track_count, is_public, created_at_sc)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (user_id, p.get("playlist_id"), p.get("playlist_title"),
+                 p.get("description"), p.get("genre"), p.get("tag_list"),
+                 p.get("track_count"), p.get("is_public"),
+                 p.get("created_at_sc"))
+            )
+
+
+def save_soundcloud_user_tracks(user_id, tracks_list):
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM soundcloud_user_tracks WHERE user_id = ?", (user_id,)
+        )
+        for t in tracks_list:
+            conn.execute(
+                """INSERT INTO soundcloud_user_tracks
+                   (user_id, track_id, track_title, genre, tag_list,
+                    bpm, key_signature, duration_ms, playback_count,
+                    likes_count, created_at_sc)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (user_id, t.get("track_id"), t.get("track_title"),
+                 t.get("genre"), t.get("tag_list"), t.get("bpm"),
+                 t.get("key_signature"), t.get("duration_ms"),
+                 t.get("playback_count"), t.get("likes_count"),
+                 t.get("created_at_sc"))
+            )
+
+
+def get_soundcloud_likes(user_id):
+    with get_connection() as conn:
+        rows = conn.execute(
+            """SELECT * FROM soundcloud_likes
+               WHERE user_id = ? ORDER BY liked_at DESC""",
+            (user_id,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def get_soundcloud_followings(user_id):
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM soundcloud_followings WHERE user_id = ?",
+            (user_id,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def get_soundcloud_reposts(user_id):
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM soundcloud_reposts WHERE user_id = ? ORDER BY reposted_at DESC",
+            (user_id,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def get_soundcloud_playlists(user_id):
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM soundcloud_playlists WHERE user_id = ?",
+            (user_id,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def get_soundcloud_user_tracks(user_id):
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM soundcloud_user_tracks WHERE user_id = ?",
+            (user_id,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def save_soundcloud_taste_profile(user_id, profile_dict):
+    with get_connection() as conn:
+        existing = conn.execute(
+            "SELECT user_id FROM soundcloud_taste_profiles WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+
+        if existing:
+            fields = {k: v for k, v in profile_dict.items() if k != "user_id"}
+            fields["last_updated"] = datetime.utcnow().isoformat()
+            set_clause = ", ".join(f'"{k}" = ?' for k in fields)
+            values = list(fields.values()) + [user_id]
+            conn.execute(
+                f"UPDATE soundcloud_taste_profiles SET {set_clause} WHERE user_id = ?",
+                values
+            )
+        else:
+            profile_dict["user_id"] = user_id
+            cols = ", ".join(f'"{k}"' for k in profile_dict)
+            placeholders = ", ".join("?" * len(profile_dict))
+            conn.execute(
+                f"INSERT INTO soundcloud_taste_profiles ({cols}) VALUES ({placeholders})",
+                list(profile_dict.values())
+            )
+
+
+def get_soundcloud_taste_profile(user_id):
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM soundcloud_taste_profiles WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def update_soundcloud_research_status(user_id, status):
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE soundcloud_taste_profiles SET research_status = ?,
+               last_updated = CURRENT_TIMESTAMP WHERE user_id = ?""",
+            (status, user_id)
+        )
+
+
+def save_soundcloud_production_dna(user_id, dna_text):
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE soundcloud_taste_profiles SET production_dna = ?,
+               research_status = 'complete',
+               last_updated = CURRENT_TIMESTAMP WHERE user_id = ?""",
+            (dna_text, user_id)
+        )
+
+
+def clear_soundcloud_data(user_id):
+    """Clear all SoundCloud listening data for a user (not artist_research_cache)."""
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM soundcloud_likes WHERE user_id = ?", (user_id,)
+        )
+        conn.execute(
+            "DELETE FROM soundcloud_followings WHERE user_id = ?", (user_id,)
+        )
+        conn.execute(
+            "DELETE FROM soundcloud_reposts WHERE user_id = ?", (user_id,)
+        )
+        conn.execute(
+            "DELETE FROM soundcloud_playlists WHERE user_id = ?", (user_id,)
+        )
+        conn.execute(
+            "DELETE FROM soundcloud_user_tracks WHERE user_id = ?", (user_id,)
+        )
+
+
+def disconnect_soundcloud(user_id):
+    """Clear all SoundCloud data including tokens and taste profile."""
+    clear_soundcloud_data(user_id)
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM soundcloud_taste_profiles WHERE user_id = ?", (user_id,)
+        )
+        conn.execute(
+            "DELETE FROM soundcloud_tokens WHERE user_id = ?", (user_id,)
+        )
+        conn.execute(
+            """UPDATE users SET soundcloud_id = NULL,
+               updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            (user_id,)
         )
 
 

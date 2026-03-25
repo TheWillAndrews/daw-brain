@@ -110,4 +110,24 @@ const API = {
     if (!res.ok) throw new Error("Failed to refresh Spotify data");
     return res.json();
   },
+
+  // ─── SoundCloud ─────────────────────────────────────────────
+
+  async getSoundCloudStatus() {
+    const res = await fetch("/api/soundcloud/status");
+    if (!res.ok) throw new Error("Failed to get SoundCloud status");
+    return res.json();
+  },
+
+  async disconnectSoundCloud() {
+    const res = await fetch("/api/soundcloud/disconnect", { method: "POST" });
+    if (!res.ok) throw new Error("Failed to disconnect SoundCloud");
+    return res.json();
+  },
+
+  async refreshSoundCloud() {
+    const res = await fetch("/api/soundcloud/refresh", { method: "POST" });
+    if (!res.ok) throw new Error("Failed to refresh SoundCloud data");
+    return res.json();
+  },
 };

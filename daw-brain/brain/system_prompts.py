@@ -76,59 +76,175 @@ SKILL_LEVEL_PROMPTS = {
 }
 
 
-def build_taste_context(user_id):
-    """Build the LISTENER PROFILE section from Spotify taste data.
+def _parse_json_field(raw, default=None):
+    """Safely parse a JSON field that might be a string or already parsed."""
+    if default is None:
+        default = []
+    if not raw:
+        return default
+    try:
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return default
 
-    Returns a formatted string for injection into the system prompt,
-    or empty string if no profile exists.
+
+def build_taste_context(user_id):
+    """Build the LISTENER PROFILE section from Spotify and/or SoundCloud data.
+
+    Merges both profiles if both are connected. Returns a formatted string
+    for injection into the system prompt, or empty string if no profile exists.
     """
     try:
-        from brain.database import get_taste_profile, get_user_top_artists
+        from brain.database import (
+            get_taste_profile, get_user_top_artists,
+            get_soundcloud_taste_profile, get_soundcloud_tokens,
+            get_spotify_tokens,
+        )
     except ImportError:
         return ""
 
-    profile = get_taste_profile(user_id)
-    if not profile:
+    spotify_profile = get_taste_profile(user_id)
+    sc_profile = get_soundcloud_taste_profile(user_id)
+
+    has_spotify = spotify_profile is not None and get_spotify_tokens(user_id) is not None
+    has_sc = sc_profile is not None and get_soundcloud_tokens(user_id) is not None
+
+    if not has_spotify and not has_sc:
         return ""
 
-    # Parse top genres
-    top_genres_raw = profile.get("top_genres", "[]")
-    try:
-        top_genres = json.loads(top_genres_raw) if isinstance(top_genres_raw, str) else top_genres_raw
-    except (json.JSONDecodeError, TypeError):
-        top_genres = []
+    # Determine sources label
+    sources = []
+    if has_spotify:
+        sources.append("Spotify")
+    if has_sc:
+        sources.append("SoundCloud")
+    sources_str = " + ".join(sources)
 
-    # Get short-term and long-term top artist names
-    short_artists = get_user_top_artists(user_id, "short_term")
-    long_artists = get_user_top_artists(user_id, "long_term")
-    short_names = ", ".join(a["artist_name"] for a in short_artists[:5]) if short_artists else "N/A"
-    long_names = ", ".join(a["artist_name"] for a in long_artists[:5]) if long_artists else "N/A"
+    # ── BPM ───────────────────────────────────────────────────
+    bpm_parts = []
+    if has_spotify and spotify_profile.get("preferred_bpm"):
+        bpm_parts.append(float(spotify_profile["preferred_bpm"]))
+    if has_sc and sc_profile.get("avg_bpm"):
+        bpm_parts.append(float(sc_profile["avg_bpm"]))
+    preferred_bpm = round(sum(bpm_parts) / len(bpm_parts), 1) if bpm_parts else "N/A"
 
-    ctx = f"""LISTENER PROFILE (from Spotify):
-Preferred BPM: {profile.get('preferred_bpm', 'N/A')} (range: {profile.get('bpm_range_low', '?')}-{profile.get('bpm_range_high', '?')})
-Preferred keys: {profile.get('preferred_keys', 'N/A')}
-Energy: {profile.get('energy_level', 'N/A')} ({profile.get('avg_energy', 0):.2f})
-Danceability: {profile.get('danceability_level', 'N/A')} ({profile.get('avg_danceability', 0):.2f})
-Mood: {profile.get('mood', 'N/A')} (valence: {profile.get('avg_valence', 0):.2f})
-Vocal preference: {profile.get('vocal_preference', 'N/A')} (instrumentalness: {profile.get('avg_instrumentalness', 0):.2f})
-Acousticness: {(profile.get('avg_acousticness') or 0):.2f}
-Loudness tendency: {(profile.get('avg_loudness') or 0):.1f} dB
-Top genres: {', '.join(top_genres[:10]) if top_genres else 'N/A'}
-Recent favorites: {short_names}
-All-time favorites: {long_names}
-Taste evolution: {profile.get('evolving_taste', 'N/A')}
-"""
+    bpm_range = ""
+    if has_spotify:
+        bpm_range = f" (range: {spotify_profile.get('bpm_range_low', '?')}-{spotify_profile.get('bpm_range_high', '?')})"
 
-    # Add Production DNA if research is complete
-    dna = profile.get("production_dna")
-    if dna and profile.get("research_status") == "complete":
-        ctx += f"""
-PRODUCTION DNA (researched from favorite artists):
-{dna}
-"""
+    # ── Keys ──────────────────────────────────────────────────
+    keys = spotify_profile.get("preferred_keys", "N/A") if has_spotify else "N/A"
+    if has_sc:
+        sc_keys = _parse_json_field(sc_profile.get("preferred_keys"))
+        if sc_keys:
+            keys = ", ".join(sc_keys) if keys == "N/A" else f"{keys}, {', '.join(sc_keys)}"
+
+    # ── Energy / Mood / Vocal ─────────────────────────────────
+    def _merge_quality(sp_val, sc_val):
+        if sp_val and sc_val:
+            if sp_val == sc_val:
+                return sp_val
+            return f"{sp_val} (Spotify) / {sc_val} (SoundCloud)"
+        return sp_val or sc_val or "N/A"
+
+    sp_energy = spotify_profile.get("energy_level") if has_spotify else None
+    sc_energy = sc_profile.get("energy_level") if has_sc else None
+    energy = _merge_quality(sp_energy, sc_energy)
+
+    sp_mood = spotify_profile.get("mood") if has_spotify else None
+    sc_mood = sc_profile.get("mood") if has_sc else None
+    mood = _merge_quality(sp_mood, sc_mood)
+
+    sp_vocal = spotify_profile.get("vocal_preference") if has_spotify else None
+    sc_vocal = sc_profile.get("vocal_preference") if has_sc else None
+    vocal = _merge_quality(sp_vocal, sc_vocal)
+
+    # ── Genres (merged, deduplicated) ─────────────────────────
+    all_genres = []
+    if has_spotify:
+        all_genres.extend(_parse_json_field(spotify_profile.get("top_genres")))
+    if has_sc:
+        all_genres.extend(_parse_json_field(sc_profile.get("top_genres")))
+    seen = set()
+    merged_genres = []
+    for g in all_genres:
+        gl = g.lower()
+        if gl not in seen:
+            seen.add(gl)
+            merged_genres.append(g)
+
+    # ── Artists ────────────────────────────────────────────────
+    artist_names = []
+    if has_spotify:
+        short_artists = get_user_top_artists(user_id, "short_term")
+        artist_names.extend(a["artist_name"] for a in short_artists[:5])
+    if has_sc:
+        sc_artists = _parse_json_field(sc_profile.get("top_artists"))
+        artist_names.extend(sc_artists[:5])
+    seen_artists = set()
+    unique_artists = []
+    for a in artist_names:
+        al = a.lower()
+        if al not in seen_artists:
+            seen_artists.add(al)
+            unique_artists.append(a)
+
+    # ── Build Context String ──────────────────────────────────
+    ctx = f"LISTENER PROFILE (from {sources_str}):\n"
+    ctx += f"This producer's listening is centered on: {', '.join(merged_genres[:6]) if merged_genres else 'N/A'}\n"
+    ctx += f"Estimated BPM preference: {preferred_bpm}{bpm_range}\n"
+
+    if keys and keys != "N/A":
+        ctx += f"Preferred keys: {keys}\n"
+
+    ctx += f"Energy level: {energy}\n"
+    ctx += f"Mood tendency: {mood}\n"
+    ctx += f"Vocal preference: {vocal}\n"
+
+    ctx += f"Top genres: {', '.join(merged_genres[:10]) if merged_genres else 'N/A'}\n"
+
+    # SoundCloud-specific fields
+    if has_sc:
+        sc_tags = _parse_json_field(sc_profile.get("top_tags"))
+        if sc_tags:
+            ctx += f"Top tags: {', '.join(sc_tags[:10])} (SoundCloud)\n"
+        if sc_profile.get("underground_score") is not None:
+            ctx += f"Underground score: {sc_profile['underground_score']}/10 (SoundCloud)\n"
+
+    ctx += f"Recent favorites: {', '.join(unique_artists[:8]) if unique_artists else 'N/A'}\n"
+
+    if has_spotify:
+        long_artists = get_user_top_artists(user_id, "long_term")
+        long_names = ", ".join(a["artist_name"] for a in long_artists[:5]) if long_artists else "N/A"
+        ctx += f"All-time favorites: {long_names}\n"
+
+    # Taste evolution
+    evolutions = []
+    if has_spotify and spotify_profile.get("evolving_taste"):
+        evolutions.append(spotify_profile["evolving_taste"])
+    if has_sc and sc_profile.get("evolving_taste"):
+        evolutions.append(sc_profile["evolving_taste"])
+    if evolutions:
+        ctx += f"Taste evolution: {'; '.join(evolutions)}\n"
+
+    # Production DNA
+    dna_parts = []
+    if has_spotify:
+        sp_dna = spotify_profile.get("production_dna")
+        if sp_dna and spotify_profile.get("research_status") == "complete":
+            dna_parts.append(f"From Spotify artists:\n{sp_dna}")
+    if has_sc:
+        sc_dna = sc_profile.get("production_dna")
+        if sc_dna and sc_profile.get("research_status") == "complete":
+            dna_parts.append(f"From SoundCloud artists:\n{sc_dna}")
+
+    if dna_parts:
+        ctx += f"\nPRODUCTION DNA (researched from favorite artists):\n"
+        ctx += "\n\n".join(dna_parts)
+        ctx += "\n"
 
     ctx += """
-Use this profile to passively shape all suggestions. Don't mention the profile or Spotify explicitly unless asked. Let it influence your decisions about tempo, key, mood, energy, drum patterns, bass design, sound palette, and arrangement style. When the user asks for something generic like "give me a bass pattern," use this DNA to make opinionated choices that match their taste.
+Use this profile to passively shape all suggestions. Don't mention the profile, Spotify, or SoundCloud explicitly unless asked. Let it influence your decisions about tempo, key, mood, energy, drum patterns, bass design, sound palette, and arrangement style. When the user asks for something generic like "give me a bass pattern," use this DNA to make opinionated choices that match their taste.
 """
     return ctx
 

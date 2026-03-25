@@ -52,7 +52,7 @@ def _load_env_from_shell():
 
 _load_env_from_shell()
 
-SCOPES = "user-top-read user-read-recently-played user-library-read user-read-private user-read-email"
+SCOPES = "user-top-read user-read-recently-played user-library-read user-follow-read user-read-private user-read-email"
 REDIRECT_URI = "http://127.0.0.1:5050/callback/spotify"
 
 

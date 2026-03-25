@@ -23,11 +23,20 @@ from brain.database import (
     build_musical_context_from_db,
     get_spotify_tokens, get_taste_profile, disconnect_spotify,
     get_user_top_artists,
+    get_soundcloud_tokens, get_soundcloud_taste_profile,
+    disconnect_soundcloud, get_user,
 )
 from brain.spotify_auth import get_auth_url, handle_callback
 from brain.spotify_collector import collect_all_spotify_data
 from brain.spotify_profile import compute_taste_profile
 from brain.artist_researcher import start_background_research
+from brain.soundcloud_auth import (
+    get_auth_url as sc_get_auth_url,
+    handle_callback as sc_handle_callback,
+)
+from brain.soundcloud_collector import collect_all_soundcloud_data
+from brain.soundcloud_profile import compute_soundcloud_taste_profile
+from brain.soundcloud_researcher import start_soundcloud_background_research
 
 app = Flask(__name__, static_folder="static")
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB upload limit
@@ -452,7 +461,6 @@ def spotify_status():
         }
 
     # Get display name
-    from brain.database import get_user
     user = get_user(user_id)
     display_name = user.get("display_name", "") if user else ""
 
@@ -500,6 +508,155 @@ def spotify_refresh():
 
     threading.Thread(target=refresh_pipeline, daemon=True).start()
     return jsonify({"ok": True, "message": "Refresh started"})
+
+
+# ─── SoundCloud API ───────────────────────────────────────────
+
+@app.route("/api/soundcloud/connect")
+def soundcloud_connect():
+    """Redirect the user to SoundCloud authorization."""
+    global last_heartbeat
+    # Pre-flight: check env vars are set
+    if not os.environ.get("SOUNDCLOUD_CLIENT_ID") or not os.environ.get("SOUNDCLOUD_CLIENT_SECRET"):
+        log.error("SOUNDCLOUD_CLIENT_ID or SOUNDCLOUD_CLIENT_SECRET not set")
+        return jsonify({"error": "SoundCloud not configured. Set SOUNDCLOUD_CLIENT_ID and SOUNDCLOUD_CLIENT_SECRET in ~/.zshrc"}), 500
+    last_heartbeat = time.time() + 120
+    url = sc_get_auth_url(session)
+    log.info(f"Redirecting to SoundCloud OAuth: {url[:100]}...")
+    return redirect(url)
+
+
+@app.route("/callback/soundcloud")
+def soundcloud_callback():
+    """Handle the redirect from SoundCloud after user authorizes."""
+    global last_heartbeat
+    last_heartbeat = time.time()
+
+    code = request.args.get("code")
+    error = request.args.get("error")
+    state = request.args.get("state")
+
+    if error:
+        log.warning(f"SoundCloud auth denied: {error}")
+        return redirect("/")
+
+    if not code:
+        return redirect("/")
+
+    # Verify state
+    expected_state = session.pop("sc_oauth_state", None)
+    if state and expected_state and state != expected_state:
+        log.warning("SoundCloud OAuth state mismatch")
+        return redirect("/")
+
+    code_verifier = session.pop("sc_code_verifier", None)
+    if not code_verifier:
+        log.error("No PKCE code verifier in session")
+        return redirect("/")
+
+    try:
+        user = sc_handle_callback(code, code_verifier)
+        session["user_id"] = user["id"]
+        log.info(f"SoundCloud user logged in: {user['display_name']} (id={user['id']})")
+
+        user_id = user["id"]
+        def collect_and_compute():
+            try:
+                collect_all_soundcloud_data(user_id)
+                compute_soundcloud_taste_profile(user_id)
+                start_soundcloud_background_research(user_id)
+            except Exception as e:
+                log.error(f"SoundCloud post-auth pipeline failed: {e}")
+
+        threading.Thread(target=collect_and_compute, daemon=True).start()
+
+        return redirect("/")
+    except Exception as e:
+        log.error(f"SoundCloud callback failed:\n{traceback.format_exc()}")
+        return redirect("/")
+
+
+@app.route("/api/soundcloud/status")
+def soundcloud_status():
+    """Return SoundCloud connection status for the current user."""
+    user_id = get_current_user_id()
+    tokens = get_soundcloud_tokens(user_id)
+
+    if not tokens:
+        return jsonify({"connected": False})
+
+    profile = get_soundcloud_taste_profile(user_id)
+    taste_data = None
+    research_status = "pending"
+
+    if profile:
+        research_status = profile.get("research_status", "pending")
+        top_genres = _parse_json_field(profile.get("top_genres"))
+        top_tags = _parse_json_field(profile.get("top_tags"))
+        top_artists = _parse_json_field(profile.get("top_artists"))
+
+        taste_data = {
+            "avg_bpm": profile.get("avg_bpm"),
+            "mood": profile.get("mood"),
+            "energy_level": profile.get("energy_level"),
+            "vocal_preference": profile.get("vocal_preference"),
+            "underground_score": profile.get("underground_score"),
+            "top_genres": top_genres,
+            "top_tags": top_tags,
+            "top_artists": top_artists,
+        }
+
+    user = get_user(user_id)
+    display_name = user.get("display_name", "") if user else ""
+
+    return jsonify({
+        "connected": True,
+        "display_name": display_name,
+        "research_status": research_status,
+        "taste_profile": taste_data,
+    })
+
+
+@app.route("/api/soundcloud/disconnect", methods=["POST"])
+def soundcloud_disconnect_route():
+    """Clear the user's SoundCloud tokens and data."""
+    user_id = get_current_user_id()
+    disconnect_soundcloud(user_id)
+    log.info(f"SoundCloud disconnected for user {user_id}")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/soundcloud/refresh", methods=["POST"])
+def soundcloud_refresh():
+    """Trigger a full re-fetch of all SoundCloud data and recompute."""
+    user_id = get_current_user_id()
+    tokens = get_soundcloud_tokens(user_id)
+    if not tokens:
+        return jsonify({"error": "Not connected to SoundCloud"}), 400
+
+    def refresh_pipeline():
+        try:
+            collect_all_soundcloud_data(user_id)
+            compute_soundcloud_taste_profile(user_id)
+            start_soundcloud_background_research(user_id)
+        except Exception as e:
+            log.error(f"SoundCloud refresh pipeline failed: {e}")
+
+    threading.Thread(target=refresh_pipeline, daemon=True).start()
+    return jsonify({"ok": True, "message": "Refresh started"})
+
+
+def _parse_json_field(raw, default=None):
+    """Safely parse a JSON field."""
+    if default is None:
+        default = []
+    if not raw:
+        return default
+    try:
+        import json as _json
+        return _json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return default
 
 
 @app.errorhandler(Exception)
