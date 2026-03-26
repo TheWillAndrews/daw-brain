@@ -46,10 +46,9 @@
         </div>
       </div>
       <div class="top-nav-right">
-        <div class="skill-level-pills" id="skill-level-pills">
-          <button class="skill-pill" data-level="novice">Novice</button>
-          <button class="skill-pill" data-level="intermediate">Intermediate</button>
-          <button class="skill-pill active" data-level="expert">Expert</button>
+        <div class="mode-toggle" id="mode-toggle">
+          <button class="mode-btn active" data-mode="guided">Guided</button>
+          <button class="mode-btn" data-mode="studio">Studio</button>
         </div>
         <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
           <svg class="theme-icon sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -114,8 +113,23 @@
       </div>
     </header>
 
-    <!-- Main Content: Kanban + Outputs -->
-    <div class="kanban-area">
+    <!-- Guided Mode: 9-element sequential flow -->
+    <div class="guided-area" id="guided-area">
+      <div class="guided-elements" id="guided-elements">
+        <!-- Rendered by JS -->
+      </div>
+      <div class="outputs-panel guided-outputs-panel">
+        <div class="outputs-header">Generated Outputs</div>
+        <div class="outputs-list" id="guided-output-list">
+          <div class="outputs-empty">No outputs yet</div>
+        </div>
+        <button class="download-all-btn hidden" id="guided-download-all-btn">Download All</button>
+        <button class="clear-session-btn" id="guided-clear-session-btn">Clear Session</button>
+      </div>
+    </div>
+
+    <!-- Studio Mode: Kanban + Outputs -->
+    <div class="kanban-area" id="studio-area">
       <!-- Kanban Columns -->
       <div class="kanban-columns">
         <!-- DRUMS -->

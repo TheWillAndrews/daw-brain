@@ -214,23 +214,26 @@ CREATE TABLE IF NOT EXISTS spotify_saved_tracks (
 
 CREATE TABLE IF NOT EXISTS artist_research_cache (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-    artist_name           TEXT UNIQUE,
-    spotify_artist_id     TEXT,
-    genres                TEXT,
-    popularity            INTEGER,
-    production_profile    TEXT,
-    bpm_range             TEXT,
-    drum_style            TEXT,
-    bass_style            TEXT,
-    sound_design_notes    TEXT,
-    arrangement_style     TEXT,
-    mixing_character      TEXT,
-    signature_elements    TEXT,
+    artist_name           TEXT NOT NULL,
+    artist_name_normalized TEXT NOT NULL,
+    spotify_id            TEXT,
+    soundcloud_id         TEXT,
+    apple_music_id        TEXT,
+    schema_version        TEXT NOT NULL DEFAULT '1.0.0',
+    profile_json          TEXT NOT NULL,
+    production_dna        TEXT,
+    confidence_score      REAL,
+    researched_at         TEXT NOT NULL,
     researched_by_model   TEXT,
-    research_version      INTEGER DEFAULT 1,
-    created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    expires_at            TEXT,
+    created_at            TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at            TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(artist_name_normalized)
 );
+
+CREATE INDEX IF NOT EXISTS idx_artist_cache_name ON artist_research_cache(artist_name_normalized);
+CREATE INDEX IF NOT EXISTS idx_artist_cache_spotify ON artist_research_cache(spotify_id);
+CREATE INDEX IF NOT EXISTS idx_artist_cache_expires ON artist_research_cache(expires_at);
 
 CREATE TABLE IF NOT EXISTS soundcloud_tokens (
     user_id           INTEGER PRIMARY KEY REFERENCES users(id),
@@ -492,7 +495,21 @@ def init_db():
     """Create all tables if they don't exist."""
     os.makedirs(DB_DIR, exist_ok=True)
     with get_connection() as conn:
+        # Migration: if old artist_research_cache exists (has production_profile column),
+        # drop it so the new schema can be created. Old free-text profiles will be
+        # re-researched with the structured JSON format.
+        try:
+            arc_cols = [r[1] for r in conn.execute(
+                "PRAGMA table_info(artist_research_cache)"
+            ).fetchall()]
+            if arc_cols and "profile_json" not in arc_cols:
+                log.info("Migrating artist_research_cache to v1.0.0 JSON schema")
+                conn.execute("DROP TABLE IF EXISTS artist_research_cache")
+        except Exception:
+            pass
+
         conn.executescript(SCHEMA)
+
         # Migration: add soundcloud_id column if missing (for pre-SoundCloud DBs)
         cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
         if "soundcloud_id" not in cols:
@@ -501,6 +518,17 @@ def init_db():
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_soundcloud_id "
                 "ON users(soundcloud_id) WHERE soundcloud_id IS NOT NULL"
             )
+
+        # Migration: add aggregated_profile_json to taste profiles if missing
+        tp_cols = [r[1] for r in conn.execute(
+            "PRAGMA table_info(spotify_taste_profiles)"
+        ).fetchall()]
+        if tp_cols and "aggregated_profile_json" not in tp_cols:
+            conn.execute(
+                "ALTER TABLE spotify_taste_profiles "
+                "ADD COLUMN aggregated_profile_json TEXT"
+            )
+
     log.info(f"Database initialized at {DB_PATH}")
 
 
@@ -767,75 +795,175 @@ def get_taste_profile(user_id):
 # ─── Artist Research Cache ──────────────────────────────────────
 
 def get_artist_research(artist_name):
+    """Get a cached artist profile. Returns dict with parsed profile_json."""
+    normalized = artist_name.strip().lower()
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT * FROM artist_research_cache WHERE artist_name = ? COLLATE NOCASE",
-            (artist_name,)
+            "SELECT * FROM artist_research_cache WHERE artist_name_normalized = ?",
+            (normalized,)
         ).fetchone()
-        return _row_to_dict(row)
+        if not row:
+            return None
+        result = _row_to_dict(row)
+        try:
+            result["profile"] = json.loads(result["profile_json"])
+        except (json.JSONDecodeError, TypeError):
+            result["profile"] = None
+        return result
 
 
-def save_artist_research(artist_name, spotify_id, research_data):
+def get_artist_profile(artist_name):
+    """Get just the parsed JSON profile for an artist."""
+    research = get_artist_research(artist_name)
+    if research and research.get("profile"):
+        return research["profile"]
+    return None
+
+
+def save_artist_research(artist_name, profile_data, spotify_id=None,
+                         soundcloud_id=None, apple_music_id=None):
+    """Save or update a structured artist profile in the research cache.
+
+    profile_data can be a dict (the full profile JSON) or a JSON string.
+    """
+    normalized = artist_name.strip().lower()
+
+    if isinstance(profile_data, str):
+        profile = json.loads(profile_data)
+        profile_json_str = profile_data
+    else:
+        profile = profile_data
+        profile_json_str = json.dumps(profile)
+
+    # Extract key fields from profile
+    meta = profile.get("research_metadata", {})
+    production_dna = profile.get("production_dna_narrative")
+    confidence = meta.get("confidence_score")
+    model = meta.get("researched_by_model")
+    researched_at = meta.get("researched_at", datetime.utcnow().isoformat())
+
+    # Use IDs from profile metadata as fallback
+    spotify_id = spotify_id or meta.get("spotify_id")
+    soundcloud_id = soundcloud_id or meta.get("soundcloud_id")
+    apple_music_id = apple_music_id or meta.get("apple_music_id")
+
+    # Quarterly expiry (90 days)
+    from datetime import timedelta
+    expires_at = (datetime.utcnow() + timedelta(days=90)).isoformat()
+
     with get_connection() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO artist_research_cache
-               (artist_name, spotify_artist_id, genres, popularity,
-                production_profile, bpm_range, drum_style, bass_style,
-                sound_design_notes, arrangement_style, mixing_character,
-                signature_elements, researched_by_model, research_version,
+               (artist_name, artist_name_normalized, spotify_id, soundcloud_id,
+                apple_music_id, schema_version, profile_json, production_dna,
+                confidence_score, researched_at, researched_by_model, expires_at,
                 updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
-            (artist_name, spotify_id,
-             json.dumps(research_data.get("genres", [])),
-             research_data.get("popularity"),
-             research_data.get("production_profile"),
-             research_data.get("bpm_range"),
-             research_data.get("drum_style"),
-             research_data.get("bass_style"),
-             research_data.get("sound_design_notes"),
-             research_data.get("arrangement_style"),
-             research_data.get("mixing_character"),
-             research_data.get("signature_elements"),
-             research_data.get("researched_by_model"),
-             research_data.get("research_version", 1))
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+            (artist_name, normalized, spotify_id, soundcloud_id,
+             apple_music_id, profile.get("schema_version", "1.0.0"),
+             profile_json_str, production_dna, confidence, researched_at,
+             model, expires_at)
         )
 
 
 def get_unresearched_artists(artist_names):
+    """Return artist names that don't have cached profiles."""
     if not artist_names:
         return []
     with get_connection() as conn:
-        placeholders = ", ".join("?" * len(artist_names))
+        normalized = [name.strip().lower() for name in artist_names]
+        placeholders = ", ".join("?" * len(normalized))
         rows = conn.execute(
-            f"""SELECT artist_name FROM artist_research_cache
-                WHERE artist_name IN ({placeholders}) COLLATE NOCASE""",
-            artist_names
+            f"""SELECT artist_name_normalized FROM artist_research_cache
+                WHERE artist_name_normalized IN ({placeholders})""",
+            normalized
         ).fetchall()
-        researched = {r["artist_name"].lower() for r in rows}
-        return [name for name in artist_names if name.lower() not in researched]
+        researched = {r["artist_name_normalized"] for r in rows}
+        return [name for name in artist_names if name.strip().lower() not in researched]
 
 
 def get_all_researched_artists():
+    """Get all cached artist profiles with parsed JSON."""
     with get_connection() as conn:
         rows = conn.execute(
             "SELECT * FROM artist_research_cache ORDER BY artist_name"
         ).fetchall()
-        return _rows_to_dicts(rows)
+        results = _rows_to_dicts(rows)
+        for r in results:
+            try:
+                r["profile"] = json.loads(r["profile_json"])
+            except (json.JSONDecodeError, TypeError):
+                r["profile"] = None
+        return results
 
 
-def get_stale_artist_research(artist_names, max_age_days=30):
-    """Return artist names whose cache is older than max_age_days."""
+def get_stale_artist_research(artist_names, max_age_days=90):
+    """Return artist names whose cache has expired or is older than max_age_days."""
     if not artist_names:
         return []
     with get_connection() as conn:
-        placeholders = ", ".join("?" * len(artist_names))
+        normalized = [name.strip().lower() for name in artist_names]
+        placeholders = ", ".join("?" * len(normalized))
         rows = conn.execute(
             f"""SELECT artist_name FROM artist_research_cache
-                WHERE artist_name IN ({placeholders}) COLLATE NOCASE
-                AND updated_at < datetime('now', ?)""",
-            artist_names + [f'-{max_age_days} days']
+                WHERE artist_name_normalized IN ({placeholders})
+                AND (expires_at IS NULL OR expires_at < datetime('now'))""",
+            normalized
         ).fetchall()
         return [r["artist_name"] for r in rows]
+
+
+def get_artist_profiles_for_aggregation(user_id):
+    """Get all cached profiles for a user's top artists with their rank.
+
+    Returns list of (rank, profile_dict) tuples sorted by rank.
+    """
+    with get_connection() as conn:
+        # Get top artists across all time ranges, best rank per artist
+        artists = conn.execute(
+            """SELECT artist_name, MIN(rank) as best_rank
+               FROM spotify_top_artists
+               WHERE user_id = ? AND artist_name IS NOT NULL
+               GROUP BY artist_name
+               ORDER BY best_rank""",
+            (user_id,)
+        ).fetchall()
+
+    profiles = []
+    for i, artist_row in enumerate(artists):
+        name = artist_row["artist_name"]
+        rank = artist_row["best_rank"] or (i + 1)
+        research = get_artist_research(name)
+        if research and research.get("profile"):
+            profiles.append((rank, research["profile"]))
+
+    return profiles
+
+
+def save_aggregated_taste_profile(user_id, profile_json):
+    """Save the computed aggregated taste profile JSON to the taste profile row."""
+    profile_str = json.dumps(profile_json) if isinstance(profile_json, dict) else profile_json
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE spotify_taste_profiles SET aggregated_profile_json = ?,
+               last_updated = CURRENT_TIMESTAMP WHERE user_id = ?""",
+            (profile_str, user_id)
+        )
+
+
+def get_aggregated_taste_profile(user_id):
+    """Get the computed aggregated taste profile for a user."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT aggregated_profile_json FROM spotify_taste_profiles WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+        if row and row["aggregated_profile_json"]:
+            try:
+                return json.loads(row["aggregated_profile_json"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return None
 
 
 def get_user_saved_tracks(user_id):
@@ -963,10 +1091,11 @@ def get_research_queue(status="pending", limit=20):
 
 def artist_in_research_cache(artist_name):
     """Check if an artist is already in the research cache."""
+    normalized = artist_name.strip().lower()
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT id FROM artist_research_cache WHERE artist_name = ? COLLATE NOCASE",
-            (artist_name,)
+            "SELECT id FROM artist_research_cache WHERE artist_name_normalized = ?",
+            (normalized,)
         ).fetchone()
         return row is not None
 

@@ -77,7 +77,7 @@ def get_current_user_id():
 
 # Heartbeat: browser pings every 3s, server shuts down after 10s of silence
 last_heartbeat = time.time()
-HEARTBEAT_TIMEOUT = 10
+HEARTBEAT_TIMEOUT = 600  # 10 min — keeps server alive during dev/diagnostic
 
 
 @app.route("/api/heartbeat", methods=["POST"])
@@ -623,29 +623,9 @@ def spotify_diagnostic():
                 (user_id,),
             ).fetchall()
 
-            # Count genres — exclude empty JSON arrays '[]'
-            all_genres_raw = db.execute(
-                "SELECT genres FROM spotify_top_artists "
-                "WHERE user_id = ? AND genres IS NOT NULL AND genres != '' AND genres != '[]'",
-                (user_id,),
-            ).fetchall()
+            # Genre data no longer available from Spotify API (deprecated Nov 2024)
             total_genre_tags = 0
             unique_genres = set()
-            for row in all_genres_raw:
-                try:
-                    genres = json.loads(row["genres"]) if isinstance(row["genres"], str) else row["genres"]
-                    if isinstance(genres, list):
-                        total_genre_tags += len(genres)
-                        unique_genres.update(genres)
-                except Exception:
-                    pass
-
-            # Count how many artists have empty genres (the '[]' problem)
-            empty_genre_count = db.execute(
-                "SELECT COUNT(*) as c FROM spotify_top_artists "
-                "WHERE user_id = ? AND (genres IS NULL OR genres = '' OR genres = '[]')",
-                (user_id,),
-            ).fetchone()["c"]
 
             all_top_tracks = db.execute(
                 "SELECT track_name, artist_name, album_name, time_range, rank, bpm, energy, danceability "
@@ -689,11 +669,7 @@ def spotify_diagnostic():
                     "recent_plays": recent_plays_count,
                 },
                 "genre_stats": {
-                    "total_genre_tags": total_genre_tags,
-                    "unique_genres": len(unique_genres),
-                    "sample_genres": sorted(list(unique_genres))[:20],
-                    "artists_with_empty_genres": empty_genre_count,
-                    "artists_total": top_artists_count,
+                    "note": "Genre tags deprecated by Spotify API (Nov 2024). Artist research uses AI profiling instead.",
                 },
                 "sample_artists": [dict(a) for a in sample_artists],
                 "top_tracks": [dict(t) for t in all_top_tracks],
@@ -723,15 +699,10 @@ def spotify_diagnostic():
 
             reason = None
             if not has_data:
-                genre_stats = diagnostic["stages"].get("2_raw_data", {}).get("genre_stats", {})
-                if genre_stats.get("total_genre_tags", 0) == 0:
-                    reason = (
-                        f"All {genre_stats.get('artists_total', 0)} artists have empty genre arrays from Spotify. "
-                        "compute_taste_profile() requires genre data to compute attributes. "
-                        "This is a Spotify API limitation — many smaller/niche artists lack genre tags."
-                    )
-                else:
-                    reason = "Genre data exists but no weighted sources contributed. Check excluded sources."
+                reason = (
+                    "Genre-based taste profile unavailable (Spotify deprecated genre tags Nov 2024). "
+                    "Taste profile is now computed from structured artist research in Stage 4."
+                )
 
             diagnostic["stages"]["3_taste_profile"] = {
                 "status": "computed" if has_data else "missing",
@@ -742,21 +713,27 @@ def spotify_diagnostic():
         except Exception as e:
             diagnostic["stages"]["3_taste_profile"] = {"status": "error", "error": str(e)}
 
-        # STAGE 4: Artist research / Production DNA
+        # STAGE 4: Artist research / Production DNA (v1.0.0 structured profiles)
         try:
             researched_count = db.execute(
                 "SELECT COUNT(*) as c FROM artist_research_cache"
             ).fetchone()["c"]
             sample_research = db.execute(
-                "SELECT artist_name, production_profile "
-                "FROM artist_research_cache LIMIT 5"
+                "SELECT artist_name, production_dna, confidence_score, "
+                "schema_version, researched_by_model "
+                "FROM artist_research_cache ORDER BY updated_at DESC LIMIT 5"
             ).fetchall()
 
-            # Count how many have real research vs "I don't have" placeholders
-            no_data_count = db.execute(
+            # Count low-confidence profiles
+            low_confidence_count = db.execute(
                 "SELECT COUNT(*) as c FROM artist_research_cache "
-                "WHERE production_profile LIKE '%don''t have specific%' "
-                "OR production_profile LIKE '%don''t have sufficient%'"
+                "WHERE confidence_score IS NOT NULL AND confidence_score < 0.4"
+            ).fetchone()["c"]
+
+            # Count expired profiles
+            expired_count = db.execute(
+                "SELECT COUNT(*) as c FROM artist_research_cache "
+                "WHERE expires_at IS NOT NULL AND expires_at < datetime('now')"
             ).fetchone()["c"]
 
             queue_count = 0
@@ -767,16 +744,33 @@ def spotify_diagnostic():
             except Exception:
                 pass
 
+            # Check for aggregated taste profile
+            has_aggregated = False
+            try:
+                agg_row = db.execute(
+                    "SELECT aggregated_profile_json FROM spotify_taste_profiles "
+                    "WHERE user_id = ? AND aggregated_profile_json IS NOT NULL",
+                    (user_id,)
+                ).fetchone()
+                has_aggregated = agg_row is not None
+            except Exception:
+                pass
+
             diagnostic["stages"]["4_artist_research"] = {
                 "status": "has_research" if researched_count > 0 else "empty",
+                "schema_version": "1.0.0",
                 "researched_artists": researched_count,
-                "no_data_artists": no_data_count,
-                "useful_research": researched_count - no_data_count,
+                "low_confidence_artists": low_confidence_count,
+                "expired_profiles": expired_count,
+                "useful_research": researched_count - low_confidence_count,
                 "pending_in_queue": queue_count,
+                "has_aggregated_taste_profile": has_aggregated,
                 "sample_research": [
                     {
                         "artist": dict(r)["artist_name"],
-                        "summary_preview": (dict(r).get("production_profile") or "")[:200],
+                        "confidence": dict(r).get("confidence_score"),
+                        "model": dict(r).get("researched_by_model"),
+                        "dna_preview": (dict(r).get("production_dna") or "")[:200],
                     }
                     for r in sample_research
                 ],

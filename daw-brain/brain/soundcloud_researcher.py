@@ -1,6 +1,8 @@
 """
 SoundCloud artist research — extracts top artists from SoundCloud data
 and feeds them into the shared artist research pipeline.
+
+Uses the same structured JSON research from artist_researcher.py.
 """
 
 import json
@@ -16,7 +18,7 @@ from brain.database import (
     get_soundcloud_taste_profile,
 )
 from brain.artist_researcher import (
-    _research_single_artist, _parse_research_fields,
+    _research_single_artist, _format_profile_summary,
     SYNTHESIS_PROMPT, MODEL,
 )
 
@@ -77,6 +79,7 @@ def research_soundcloud_artists(user_id):
     """Research the user's top SoundCloud artists' production styles.
 
     Uses the shared artist_research_cache — skips already-researched artists.
+    Now returns structured JSON profiles via the shared research pipeline.
     """
     update_soundcloud_research_status(user_id, "in_progress")
 
@@ -91,7 +94,7 @@ def research_soundcloud_artists(user_id):
 
         # Check shared cache — skip already researched
         unresearched = get_unresearched_artists(artist_names)
-        stale = get_stale_artist_research(artist_names, max_age_days=30)
+        stale = get_stale_artist_research(artist_names, max_age_days=90)
         needs_research = list(set(unresearched + stale))
 
         log.info(f"SoundCloud artist research: {len(top_artists)} total, "
@@ -112,44 +115,33 @@ def research_soundcloud_artists(user_id):
                             genres = g
                             break
 
-                    profile_text = _research_single_artist(client, artist_name, genres)
-                    if not profile_text:
+                    profile = _research_single_artist(client, artist_name, genres)
+                    if not profile:
                         continue
 
-                    fields = _parse_research_fields(profile_text)
-                    research_data = {
-                        "genres": genres,
-                        "popularity": None,
-                        "production_profile": profile_text,
-                        "bpm_range": fields.get("bpm_range"),
-                        "drum_style": fields.get("drum_style"),
-                        "bass_style": fields.get("bass_style"),
-                        "sound_design_notes": fields.get("sound_design_notes"),
-                        "arrangement_style": fields.get("arrangement_style"),
-                        "mixing_character": fields.get("mixing_character"),
-                        "signature_elements": fields.get("signature_elements"),
-                        "researched_by_model": MODEL,
-                        "research_version": 1,
-                    }
-                    save_artist_research(artist_name, None, research_data)
-                    log.info(f"Researched (SoundCloud): {artist_name}")
+                    save_artist_research(artist_name, profile)
+                    log.info(
+                        f"Researched (SoundCloud): {artist_name} "
+                        f"(confidence: {profile.get('research_metadata', {}).get('confidence_score', '?')})"
+                    )
 
                 if i + 3 < len(needs_research):
                     time.sleep(1)
 
-        # Synthesis: build Production DNA from all researched artists
-        profiles_text = []
+        # Synthesis: build Production DNA from all researched structured profiles
+        profile_summaries = []
         for artist_name, _ in top_artists:
             cached = get_artist_research(artist_name)
-            if cached and cached.get("production_profile"):
-                profiles_text.append(f"**{artist_name}:**\n{cached['production_profile']}")
+            if cached and cached.get("profile"):
+                summary = _format_profile_summary(cached["profile"])
+                profile_summaries.append(summary)
 
-        if profiles_text:
+        if profile_summaries:
             try:
                 import anthropic
                 client = anthropic.Anthropic()
                 synthesis_prompt = SYNTHESIS_PROMPT.format(
-                    profiles="\n\n".join(profiles_text)
+                    profiles="\n\n".join(profile_summaries)
                 )
                 response = client.messages.create(
                     model=MODEL,

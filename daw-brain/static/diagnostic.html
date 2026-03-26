@@ -249,17 +249,8 @@
                 </div>`;
 
                 const g = s2.genre_stats || {};
-                if (g.unique_genres > 0) {
-                    out += `<div style="margin-top:12px;font-size:13px;color:#fff;">${g.total_genre_tags} genre tags across ${g.unique_genres} unique genres</div>`;
-                    out += '<div class="genre-tags">';
-                    (g.sample_genres || []).forEach(genre => {
-                        out += `<span class="genre-tag">${escapeHtml(genre)}</span>`;
-                    });
-                    out += '</div>';
-                } else {
-                    const empty = g.artists_with_empty_genres || 0;
-                    const total = g.artists_total || 0;
-                    out += `<div style="margin-top:8px;color:#ef4444;font-size:13px;">No genre tags found. ${empty}/${total} artists have empty genre arrays from Spotify API. This blocks taste profile computation.</div>`;
+                if (g.note) {
+                    out += `<div style="margin-top:8px;color:#888;font-size:13px;">${escapeHtml(g.note)}</div>`;
                 }
 
                 // 1. Top Artists dropdown

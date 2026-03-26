@@ -91,14 +91,15 @@ def _parse_json_field(raw, default=None):
 def build_taste_context(user_id):
     """Build the LISTENER PROFILE section from Spotify and/or SoundCloud data.
 
-    Merges both profiles if both are connected. Returns a formatted string
-    for injection into the system prompt, or empty string if no profile exists.
+    Uses the rich aggregated taste profile (from structured artist research)
+    when available, falling back to the genre-based profile for backward
+    compatibility. Returns a formatted string for system prompt injection.
     """
     try:
         from brain.database import (
             get_taste_profile, get_user_top_artists,
             get_soundcloud_taste_profile, get_soundcloud_tokens,
-            get_spotify_tokens,
+            get_spotify_tokens, get_aggregated_taste_profile,
         )
     except ImportError:
         return ""
@@ -112,7 +113,194 @@ def build_taste_context(user_id):
     if not has_spotify and not has_sc:
         return ""
 
-    # Determine sources label
+    # ── Try rich aggregated profile first ─────────────────────
+    aggregated = get_aggregated_taste_profile(user_id)
+    if aggregated:
+        return _build_rich_taste_context(
+            aggregated, user_id, spotify_profile, sc_profile,
+            has_spotify, has_sc
+        )
+
+    # ── Fallback: genre-based profile ─────────────────────────
+    return _build_legacy_taste_context(
+        user_id, spotify_profile, sc_profile, has_spotify, has_sc
+    )
+
+
+def _build_rich_taste_context(aggregated, user_id, spotify_profile, sc_profile,
+                               has_spotify, has_sc):
+    """Build taste context from the structured aggregated profile."""
+    sources = []
+    if has_spotify:
+        sources.append("Spotify")
+    if has_sc:
+        sources.append("SoundCloud")
+    sources_str = " + ".join(sources)
+
+    ctx = f"LISTENER PROFILE (from {sources_str} — {aggregated.get('artist_count', 0)} artists analyzed):\n\n"
+
+    # Genre & Scene
+    genre = aggregated.get("genre", {})
+    if genre.get("primary"):
+        ctx += f"Primary genre: {genre['primary']}\n"
+    if genre.get("secondary"):
+        ctx += f"Secondary genres: {', '.join(genre['secondary'])}\n"
+    if genre.get("all_tags"):
+        ctx += f"Genre tags: {', '.join(genre['all_tags'][:10])}\n"
+
+    # Tempo & Rhythm
+    tempo = aggregated.get("tempo", {})
+    if tempo.get("center_bpm"):
+        bpm_range = tempo.get("bpm_range", [None, None])
+        range_str = ""
+        if bpm_range[0] and bpm_range[1]:
+            range_str = f" (range: {bpm_range[0]}-{bpm_range[1]})"
+        ctx += f"BPM: {tempo['center_bpm']}{range_str}\n"
+    if tempo.get("groove_tendency"):
+        ctx += f"Groove: {tempo['groove_tendency']}"
+        if tempo.get("swing_tendency"):
+            ctx += f", swing: {tempo['swing_tendency']}"
+        ctx += "\n"
+    if tempo.get("rhythmic_complexity") is not None:
+        ctx += f"Rhythmic complexity: {tempo['rhythmic_complexity']:.1f}/1.0\n"
+
+    ctx += "\n"
+
+    # Sound Palette
+    palette = aggregated.get("sound_palette", {})
+    ctx += "SOUND PALETTE:\n"
+    if palette.get("drum_aesthetic"):
+        ctx += f"  Drum aesthetic: {palette['drum_aesthetic']}\n"
+    if palette.get("kick_pattern"):
+        ctx += f"  Kick: {palette.get('kick_character', '?')} ({palette['kick_pattern']})\n"
+    if palette.get("percussion_layers"):
+        ctx += f"  Percussion: {palette['percussion_layers']}"
+        if palette.get("common_percussion"):
+            ctx += f" — {', '.join(palette['common_percussion'][:5])}"
+        ctx += "\n"
+    if palette.get("hihat_complexity") is not None:
+        ctx += f"  Hi-hat complexity: {palette['hihat_complexity']:.1f}/1.0\n"
+    if palette.get("bass_character"):
+        bass_detail = palette['bass_character']
+        if palette.get("bass_movement"):
+            bass_detail += f", {palette['bass_movement']}"
+        if palette.get("bass_sidechain"):
+            bass_detail += f", sidechain: {palette['bass_sidechain']}"
+        ctx += f"  Bass: {bass_detail}\n"
+    if palette.get("bass_synth_method"):
+        ctx += f"  Bass synthesis: {palette['bass_synth_method']}\n"
+    if palette.get("texture_density"):
+        ctx += f"  Texture density: {palette['texture_density']}\n"
+    if palette.get("vocal_preference"):
+        ctx += f"  Vocals: {palette['vocal_preference']}\n"
+    if palette.get("common_instruments"):
+        ctx += f"  Common melodic instruments: {', '.join(palette['common_instruments'][:6])}\n"
+    if palette.get("synthesis_methods"):
+        ctx += f"  Synthesis: {', '.join(palette['synthesis_methods'])}\n"
+
+    # Harmony
+    harmony = aggregated.get("harmony", {})
+    if harmony.get("key_preference") or harmony.get("chord_complexity"):
+        ctx += "\nHARMONY:\n"
+        if harmony.get("key_preference"):
+            ctx += f"  Key preference: {harmony['key_preference']}\n"
+        if harmony.get("chord_complexity"):
+            ctx += f"  Chord complexity: {harmony['chord_complexity']}\n"
+        if harmony.get("melodic_presence"):
+            ctx += f"  Melodic presence: {harmony['melodic_presence']}\n"
+
+    # Arrangement
+    arr = aggregated.get("arrangement", {})
+    if arr.get("structure_style"):
+        ctx += "\nARRANGEMENT:\n"
+        ctx += f"  Structure: {arr['structure_style']}\n"
+        if arr.get("build_intensity") is not None:
+            ctx += f"  Build intensity: {arr['build_intensity']:.1f}/1.0\n"
+        if arr.get("drop_impact") is not None:
+            ctx += f"  Drop impact: {arr['drop_impact']:.1f}/1.0\n"
+        if arr.get("variation_level") is not None:
+            ctx += f"  Variation: {arr['variation_level']:.1f}/1.0\n"
+        if arr.get("preferred_transitions"):
+            ctx += f"  Transitions: {', '.join(arr['preferred_transitions'])}\n"
+
+    # Mix Character
+    mix = aggregated.get("mix_character", {})
+    if mix.get("aesthetic"):
+        ctx += "\nMIX CHARACTER:\n"
+        ctx += f"  Aesthetic: {mix['aesthetic']}\n"
+        if mix.get("frequency_emphasis"):
+            ctx += f"  Frequency emphasis: {mix['frequency_emphasis']}\n"
+        if mix.get("sidechain_style"):
+            ctx += f"  Sidechain: {mix['sidechain_style']}\n"
+        if mix.get("dynamic_range"):
+            ctx += f"  Dynamic range: {mix['dynamic_range']}\n"
+
+    # Mood & Energy
+    mood = aggregated.get("mood_and_energy", {})
+    ctx += "\nMOOD & ENERGY:\n"
+    if mood.get("primary_mood"):
+        ctx += f"  Mood: {mood['primary_mood']}\n"
+    if mood.get("energy") is not None:
+        ctx += f"  Energy: {mood['energy']:.1f}/1.0\n"
+    if mood.get("danceability") is not None:
+        ctx += f"  Danceability: {mood['danceability']:.1f}/1.0\n"
+    if mood.get("darkness_brightness") is not None:
+        ctx += f"  Brightness: {mood['darkness_brightness']:.1f}/1.0 (0=dark, 1=bright)\n"
+    if mood.get("hypnotic_quality") is not None:
+        ctx += f"  Hypnotic quality: {mood['hypnotic_quality']:.1f}/1.0\n"
+    if mood.get("aggression") is not None:
+        ctx += f"  Aggression: {mood['aggression']:.1f}/1.0\n"
+    if mood.get("atmosphere"):
+        ctx += f"  Atmosphere: {mood['atmosphere']}\n"
+    if mood.get("time_of_night"):
+        ctx += f"  Time of night: {mood['time_of_night']}\n"
+
+    # Artist Summary
+    summary = aggregated.get("artist_summary", {})
+    if summary.get("top_artists"):
+        ctx += f"\nTop artists: {', '.join(summary['top_artists'][:8])}\n"
+    if summary.get("underground_ratio") is not None:
+        ctx += f"Underground ratio: {summary['underground_ratio']:.0%}\n"
+
+    # Production DNA narrative (from legacy synthesis, if available)
+    dna_parts = []
+    if has_spotify and spotify_profile:
+        sp_dna = spotify_profile.get("production_dna")
+        if sp_dna and spotify_profile.get("research_status") == "complete":
+            dna_parts.append(sp_dna)
+    if has_sc and sc_profile:
+        sc_dna = sc_profile.get("production_dna")
+        if sc_dna and sc_profile.get("research_status") == "complete":
+            dna_parts.append(sc_dna)
+
+    if dna_parts:
+        ctx += f"\nPRODUCTION DNA SYNTHESIS:\n"
+        ctx += "\n\n".join(dna_parts)
+        ctx += "\n"
+
+    # Taste evolution
+    evolutions = []
+    if has_spotify and spotify_profile and spotify_profile.get("evolving_taste"):
+        evolutions.append(spotify_profile["evolving_taste"])
+    if has_sc and sc_profile and sc_profile.get("evolving_taste"):
+        evolutions.append(sc_profile["evolving_taste"])
+    if evolutions:
+        ctx += f"\nTaste evolution: {'; '.join(evolutions)}\n"
+
+    ctx += """
+Use this profile to passively shape all suggestions. Don't mention the profile, Spotify, or SoundCloud explicitly unless asked. Let it influence your decisions about tempo, key, mood, energy, drum patterns, bass design, sound palette, and arrangement style. When the user asks for something generic like "give me a bass pattern," use this DNA to make opinionated choices that match their taste.
+"""
+    return ctx
+
+
+def _build_legacy_taste_context(user_id, spotify_profile, sc_profile,
+                                 has_spotify, has_sc):
+    """Build taste context from the genre-based profile (backward compatibility)."""
+    try:
+        from brain.database import get_user_top_artists
+    except ImportError:
+        return ""
+
     sources = []
     if has_spotify:
         sources.append("Spotify")
@@ -350,6 +538,7 @@ The following elements have been generated in this session. Use this data to mak
 - Respect frequency ranges (don't generate content that competes in the same frequency band as existing elements)
 - Use complementary rhythms (if the kick is sparse at bar 2 beat 1, consider whether this element should fill or preserve that space)
 - Reference specific notes and positions from existing elements when explaining your decisions
+- Check the CROSS-ELEMENT ANALYSIS section (if present) for occupied/open beat positions, frequency gaps, and groove character — use this to find your lane
 
 """
         prompt += musical_context + "\n"
@@ -377,11 +566,14 @@ MIDI Pattern:
   "type": "midi",
   "name": "descriptive_snake_case_name",
   "description": "what this pattern does",
+  "musical_summary": "2-bar four-on-floor kick at C1, straight 8ths, vel 90-110, accents on 1 and 3",
   "specs": "4 bars | Quarter notes | C2 (Kick) | 128 BPM | 16 notes | Vel 90-110",
   "notes": [
     {{"pitch": 40, "start": 1.0, "duration": 0.5, "velocity": 100}}
   ]
 }}
+
+The "musical_summary" field is a compact, plain-language description of the musical content — what pitches, rhythmic positions, groove feel, velocity dynamics, and musical role this element plays. This summary is used by the system to provide context to subsequent element generation. Write it as if briefing another producer: "offbeat 16th hat pattern, open hats on &-of-2 and &-of-4, ghost closed hats at vel 40, swing feel." Be specific about positions and character.
 
 The "specs" field is a SHORT one-line summary shown in the download card. Format: "[bars] | [note values] | [pitch/instrument] | [BPM] | [note count] | [velocity range or detail]". Keep it scannable — no sentences, just pipe-separated specs. Include ghost notes or swing if present (e.g. "Vel 80-110, ghost kicks on &").
 

@@ -33,11 +33,16 @@ const sessionState = {
   scale: "minor",
   genre: "tech_house",
   spotifyProfile: null,
-  skillLevel: localStorage.getItem("daw-brain-skill-level") || "expert",
+  skillLevel: "expert",  // kept for API compat, always "expert"
+  mode: localStorage.getItem("daw-brain-mode") || "guided",  // "guided" | "studio"
 
   elements: {},
   activeElement: null,
   activeChatTab: "element",  // "element" or "general"
+
+  // Guided mode state
+  guidedOutputs: [],        // outputs generated in guided mode
+  guidedContexts: {},       // per-element context snapshots from guided generation
 
   // General chat (not tied to element)
   generalMessages: [],
@@ -103,6 +108,7 @@ function buildSessionData() {
     scale: $("#scale").value,
     genre: genreSelect.value,
     skillLevel: sessionState.skillLevel,
+    mode: sessionState.mode,
     activeElement: sessionState.activeElement,
     activeChatTab: sessionState.activeChatTab,
     elements: sessionState.elements,
@@ -117,12 +123,12 @@ function applySessionData(data) {
   if (data.key) $("#key").value = data.key;
   if (data.scale) $("#scale").value = data.scale;
 
-  // Restore skill level
-  if (data.skillLevel) {
-    sessionState.skillLevel = data.skillLevel;
-    localStorage.setItem("daw-brain-skill-level", data.skillLevel);
-    $$("#skill-level-pills .skill-pill").forEach((pill) => {
-      pill.classList.toggle("active", pill.dataset.level === data.skillLevel);
+  // Restore mode
+  if (data.mode) {
+    sessionState.mode = data.mode;
+    localStorage.setItem("daw-brain-mode", data.mode);
+    $$("#mode-toggle .mode-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.mode === data.mode);
     });
   }
 
@@ -231,7 +237,7 @@ async function clearSession() {
     // Continue with local clear even if API fails
   }
   localStorage.removeItem(STORAGE_KEY);
-  localStorage.removeItem("daw-brain-skill-level");
+  localStorage.removeItem("daw-brain-mode");
   location.reload();
 }
 
@@ -313,21 +319,334 @@ function downloadMidiFromNotes(outputData, bpm) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-// === Skill Level Toggle ===
-(function initSkillLevel() {
-  const pills = $$("#skill-level-pills .skill-pill");
-  // Restore from state (which already read localStorage)
-  pills.forEach((pill) => {
-    pill.classList.toggle("active", pill.dataset.level === sessionState.skillLevel);
-    pill.addEventListener("click", () => {
-      pills.forEach((p) => p.classList.remove("active"));
-      pill.classList.add("active");
-      sessionState.skillLevel = pill.dataset.level;
-      localStorage.setItem("daw-brain-skill-level", pill.dataset.level);
+// === Guided Mode Element Definitions ===
+// 9-element sequential flow: maps to underlying ELEMENT_DEFS IDs
+const GUIDED_ELEMENTS = [
+  { id: "kick",    label: "Kick",               mapTo: ["kick"],                  group: "drums",   defaultPrompt: "Generate a kick pattern for this track" },
+  { id: "clap",    label: "Clap / Snare",       mapTo: ["clap"],                  group: "drums",   defaultPrompt: "Generate a clap/snare pattern for this track" },
+  { id: "hats",    label: "Hi-Hats",            mapTo: ["hats"],                  group: "drums",   defaultPrompt: "Generate a hi-hat pattern for this track" },
+  { id: "perc",    label: "Percussion",          mapTo: ["perc"],                  group: "drums",   defaultPrompt: "Generate a percussion pattern for this track" },
+  { id: "bass",    label: "Bass",                mapTo: ["sub", "midbass"],        group: "bass",    defaultPrompt: "Generate a bass pattern for this track" },
+  { id: "chords",  label: "Chords / Pads / Stabs", mapTo: ["chords", "pad", "stabs"], group: "melodic", defaultPrompt: "Generate a chords/pads part for this track" },
+  { id: "lead",    label: "Melodic Lead / Hook", mapTo: ["lead", "arps", "plucks"], group: "melodic", defaultPrompt: "Generate a melodic lead or hook for this track" },
+  { id: "vocals",  label: "Vocals",              mapTo: ["mainvox", "chops", "hook", "adlibs"], group: "vocals", defaultPrompt: "Describe a vocal arrangement for this track" },
+  { id: "fx",      label: "FX & Transitions",    mapTo: ["risers", "downlifters", "impacts", "sweeps", "transitions", "textures"], group: "fx", defaultPrompt: "Generate FX and transition ideas for this track" },
+];
+
+// === Mode Toggle (Guided / Studio) ===
+(function initModeToggle() {
+  const btns = $$("#mode-toggle .mode-btn");
+  const guidedArea = $("#guided-area");
+  const studioArea = $("#studio-area");
+  const chatSection = $("#element-chat");
+  const resizeHandle = $("#resize-handle");
+
+  function applyMode(mode) {
+    sessionState.mode = mode;
+    localStorage.setItem("daw-brain-mode", mode);
+
+    btns.forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+
+    if (mode === "guided") {
+      guidedArea.classList.remove("hidden");
+      studioArea.classList.add("hidden");
+      if (chatSection) chatSection.classList.add("hidden");
+      if (resizeHandle) resizeHandle.classList.add("hidden");
+      renderGuidedElements();
+    } else {
+      guidedArea.classList.add("hidden");
+      studioArea.classList.remove("hidden");
+      if (chatSection) chatSection.classList.remove("hidden");
+      if (resizeHandle) resizeHandle.classList.remove("hidden");
+    }
+  }
+
+  btns.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      applyMode(btn.dataset.mode);
       saveSession();
     });
   });
+
+  // Apply initial mode
+  applyMode(sessionState.mode);
 })();
+
+// === Guided Mode Rendering & Logic ===
+function getGuidedElementState(guidedEl) {
+  // Check if any mapped element has outputs
+  const hasOutput = guidedEl.mapTo.some((id) => {
+    const elem = sessionState.elements[id];
+    return elem && elem.outputs && elem.outputs.length > 0;
+  });
+  const isLoading = guidedEl.mapTo.some((id) => {
+    const elem = sessionState.elements[id];
+    return elem && elem.status === "in_progress" && (!elem.outputs || elem.outputs.length === 0);
+  });
+  if (isLoading) return "loading";
+  if (hasOutput) return "generated";
+  return "empty";
+}
+
+function getRecommendedGuidedIndex() {
+  for (let i = 0; i < GUIDED_ELEMENTS.length; i++) {
+    if (getGuidedElementState(GUIDED_ELEMENTS[i]) === "empty") return i;
+  }
+  return -1; // all done
+}
+
+function renderGuidedElements() {
+  const container = $("#guided-elements");
+  if (!container) return;
+
+  const recommendedIdx = getRecommendedGuidedIndex();
+
+  container.innerHTML = GUIDED_ELEMENTS.map((gel, idx) => {
+    const state = getGuidedElementState(gel);
+    const isRecommended = idx === recommendedIdx && state === "empty";
+    const isActive = state === "loading";
+
+    // Get mini preview if generated
+    let previewHtml = "";
+    if (state === "generated") {
+      const primaryId = gel.mapTo[0];
+      const elem = sessionState.elements[primaryId];
+      const midiOutput = elem && elem.outputs
+        ? [...elem.outputs].reverse().find((o) => o.type === "midi" && Array.isArray(o.notes) && o.notes.length > 0)
+        : null;
+      if (midiOutput) {
+        previewHtml = `<canvas class="guided-preview midi-preview" data-guided-idx="${idx}"></canvas>`;
+      }
+    }
+
+    const classes = [
+      "guided-card",
+      state === "generated" ? "generated" : "",
+      isRecommended ? "recommended" : "",
+      isActive ? "active" : "",
+    ].filter(Boolean).join(" ");
+
+    const btnLabel = state === "generated" ? "Regenerate" : "Generate";
+    const btnClass = state === "generated" ? "guided-gen-btn regenerate" : "guided-gen-btn";
+
+    return `
+      <div class="${classes}" data-guided-idx="${idx}" data-guided-id="${gel.id}">
+        <div class="guided-num">${idx + 1}</div>
+        <div class="guided-info">
+          <div class="guided-name">${gel.label}</div>
+          <div class="guided-meta">${state === "generated" ? "Done" : isRecommended ? "Recommended next" : ""}</div>
+          ${previewHtml}
+        </div>
+        <div class="guided-actions">
+          <button class="${btnClass}" data-guided-idx="${idx}"${isActive ? " disabled" : ""}>
+            ${isActive ? '<span class="loading-dots"><span></span><span></span><span></span></span>' : btnLabel}
+          </button>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  // Render MIDI previews for generated elements
+  GUIDED_ELEMENTS.forEach((gel, idx) => {
+    if (getGuidedElementState(gel) !== "generated") return;
+    const canvas = container.querySelector(`.guided-preview[data-guided-idx="${idx}"]`);
+    if (!canvas) return;
+    const primaryId = gel.mapTo[0];
+    const elem = sessionState.elements[primaryId];
+    const midiOutput = elem && elem.outputs
+      ? [...elem.outputs].reverse().find((o) => o.type === "midi" && Array.isArray(o.notes) && o.notes.length > 0)
+      : null;
+    if (midiOutput) renderMidiPreview(midiOutput.notes, canvas);
+  });
+
+  // Wire generate/regenerate buttons
+  container.querySelectorAll(".guided-gen-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.guidedIdx);
+      generateGuidedElement(idx);
+    });
+  });
+
+  // Wire card click to download if generated
+  container.querySelectorAll(".guided-card.generated").forEach((card) => {
+    card.addEventListener("click", () => {
+      const idx = parseInt(card.dataset.guidedIdx);
+      downloadGuidedElement(idx);
+    });
+  });
+
+  // Update guided output list
+  renderGuidedOutputList();
+}
+
+function downloadGuidedElement(idx) {
+  const gel = GUIDED_ELEMENTS[idx];
+  const primaryId = gel.mapTo[0];
+  const elem = sessionState.elements[primaryId];
+  const midiOutput = elem && elem.outputs
+    ? [...elem.outputs].reverse().find((o) => o.type === "midi" && Array.isArray(o.notes) && o.notes.length > 0)
+    : null;
+  if (midiOutput) {
+    downloadMidiFromNotes(midiOutput, parseInt($("#bpm").value) || 128);
+    markElementDownloaded(primaryId);
+  }
+}
+
+function buildGuidedContext(guidedIdx) {
+  // Build context string describing what's already been generated
+  // Excludes the current element being generated
+  const lines = [];
+  GUIDED_ELEMENTS.forEach((gel, idx) => {
+    if (idx === guidedIdx) return;
+    if (getGuidedElementState(gel) !== "generated") return;
+
+    const primaryId = gel.mapTo[0];
+    const elem = sessionState.elements[primaryId];
+    if (!elem || !elem.outputs || elem.outputs.length === 0) return;
+
+    const midiOutput = [...elem.outputs].reverse()
+      .find((o) => o.type === "midi" && Array.isArray(o.notes) && o.notes.length > 0);
+    if (!midiOutput) return;
+
+    lines.push(`${gel.label}: ${elem.summary || midiOutput.name || "generated"}`);
+  });
+
+  return lines.length > 0
+    ? "Already generated elements:\n" + lines.join("\n")
+    : "";
+}
+
+async function generateGuidedElement(idx) {
+  if (sessionState.loading) return;
+  const gel = GUIDED_ELEMENTS[idx];
+  const primaryId = gel.mapTo[0]; // use first mapped element as the target
+
+  sessionState.loading = true;
+
+  // Mark loading state and re-render
+  const elem = sessionState.elements[primaryId];
+  const wasGenerated = elem.outputs && elem.outputs.length > 0;
+  if (!wasGenerated) {
+    elem.status = "in_progress";
+    updateElementStatus(primaryId);
+  }
+  renderGuidedElements();
+
+  try {
+    // Build context-aware prompt with cross-element analysis
+    const guidedContext = buildGuidedContext(idx);
+    const contextAnalysis = buildContextAnalysis(sessionState.elements, primaryId);
+    const elementInstructions = buildElementSpecificInstructions(gel, sessionState.elements);
+    const musicalContext = buildMusicalContext(sessionState.elements);
+    let prompt = gel.defaultPrompt;
+    if (elementInstructions) {
+      prompt += "\n\n[ELEMENT INSTRUCTIONS: " + elementInstructions + "]";
+    }
+
+    // Set active element so backend knows what we're generating
+    sessionState.activeElement = primaryId;
+
+    const apiMessages = [{ role: "user", content: prompt }];
+
+    const result = await API.chat(
+      apiMessages,
+      getSession(),
+      getGenre(),
+      primaryId,
+      buildElementHistory(),
+      sessionState.skillLevel,
+      [musicalContext, contextAnalysis, guidedContext].filter(Boolean).join("\n\n"),
+      sessionState.sessionId
+    );
+
+    // Store output on the element
+    const assistantMsg = {
+      role: "assistant",
+      content: result.text,
+      _outputData: result.output || null,
+      _fileUrl: result.file_url || null,
+    };
+    elem.chatHistory = [
+      { role: "user", content: prompt },
+      assistantMsg,
+    ];
+
+    if (result.output) {
+      const outputEntry = {
+        type: result.output.type,
+        name: result.output.name,
+        url: result.file_url,
+        element: primaryId,
+      };
+      if (result.output.type === "midi" && Array.isArray(result.output.notes)) {
+        outputEntry.notes = result.output.notes;
+      }
+      // Replace outputs on regen, append on first gen
+      if (wasGenerated) {
+        elem.outputs = [outputEntry];
+      } else {
+        elem.outputs.push(outputEntry);
+      }
+      elem.summary = result.output.musical_summary || result.output.description || result.output.name || "";
+      elem.status = "in_progress"; // stays in_progress until downloaded
+    }
+
+    updateElementStatus(primaryId);
+    saveSession();
+  } catch (e) {
+    console.error("Guided generation error:", e);
+  }
+
+  sessionState.loading = false;
+  renderGuidedElements();
+}
+
+function renderGuidedOutputList() {
+  const list = $("#guided-output-list");
+  const dlAllBtn = $("#guided-download-all-btn");
+  if (!list) return;
+
+  const outputs = [];
+  GUIDED_ELEMENTS.forEach((gel) => {
+    gel.mapTo.forEach((id) => {
+      const elem = sessionState.elements[id];
+      if (elem && elem.outputs) {
+        elem.outputs.forEach((o) => outputs.push({ ...o, element: id, label: gel.label }));
+      }
+    });
+  });
+
+  if (outputs.length === 0) {
+    list.innerHTML = '<div class="outputs-empty">No outputs yet</div>';
+    if (dlAllBtn) dlAllBtn.classList.add("hidden");
+    return;
+  }
+
+  list.innerHTML = outputs.map((o, i) => {
+    const typeLabel = getTypeLabel(o.type);
+    return `
+      <div class="output-item" data-guided-output-idx="${i}">
+        <span class="output-badge ${o.type}">${typeLabel}</span>
+        <span class="output-name">${escapeHtml(o.name || o.label)}</span>
+      </div>
+    `;
+  }).join("");
+
+  if (dlAllBtn) dlAllBtn.classList.remove("hidden");
+
+  // Click to download individual
+  list.querySelectorAll(".output-item").forEach((item) => {
+    item.addEventListener("click", () => {
+      const idx = parseInt(item.dataset.guidedOutputIdx);
+      const o = outputs[idx];
+      if (o && o.type === "midi" && Array.isArray(o.notes) && o.notes.length > 0) {
+        downloadMidiFromNotes(o, parseInt($("#bpm").value) || 128);
+        markElementDownloaded(o.element);
+      }
+    });
+  });
+}
 
 // === Session Helpers ===
 function getSession() {
@@ -1015,6 +1334,199 @@ function buildMusicalContext(elements) {
   return blocks.length > 0 ? blocks.join("\n") : "";
 }
 
+// === Cross-Element Context Analysis (for Guided Mode) ===
+// Analyzes all generated MIDI data to produce a compact summary of
+// occupied/open beat positions, harmonic content, frequency ranges, density, and groove.
+function buildContextAnalysis(elements, excludeElementId) {
+  const bpm = parseInt(document.getElementById("bpm").value) || 128;
+  const key = document.getElementById("key").value || "C";
+  const scale = document.getElementById("scale").value || "minor";
+
+  const allNotes = {};  // elemId -> notes array
+  const occupiedPositions = new Set();  // "bar.beat.sub" strings
+  const freqRangesCovered = new Set();
+  const harmonicPitches = new Set();  // pitch classes (0-11) from melodic elements
+  let totalNoteCount = 0;
+  let maxBars = 0;
+
+  Object.entries(elements).forEach(([elemId, elem]) => {
+    if (elemId === excludeElementId) return;
+    if (!elem.outputs || elem.outputs.length === 0) return;
+    if (!["in_progress", "complete"].includes(elem.status)) return;
+
+    const midiOutput = [...elem.outputs].reverse()
+      .find((o) => o.type === "midi" && Array.isArray(o.notes) && o.notes.length > 0);
+    if (!midiOutput) return;
+
+    allNotes[elemId] = midiOutput.notes;
+    totalNoteCount += midiOutput.notes.length;
+
+    const bars = barsFromNotes(midiOutput.notes);
+    if (bars > maxBars) maxBars = bars;
+
+    // Track occupied positions
+    midiOutput.notes.forEach((n) => {
+      const pos = notePosition(n.start);
+      occupiedPositions.add(pos);
+    });
+
+    // Track frequency ranges
+    const fr = ELEMENT_FREQ_RANGES[elemId];
+    if (fr) freqRangesCovered.add(fr);
+
+    // Track harmonic content from melodic elements
+    if (MELODIC_ELEMENTS.has(elemId)) {
+      midiOutput.notes.forEach((n) => {
+        harmonicPitches.add(n.pitch % 12);
+      });
+    }
+  });
+
+  if (Object.keys(allNotes).length === 0) return "";
+
+  // Build analysis
+  const lines = [];
+  lines.push("CROSS-ELEMENT ANALYSIS:");
+  lines.push(`Session: ${bpm} BPM, ${key} ${scale}, ${maxBars} bars`);
+  lines.push(`Elements generated: ${Object.keys(allNotes).join(", ")}`);
+  lines.push(`Total note density: ${totalNoteCount} notes across ${maxBars} bars`);
+
+  // Beat density analysis — find busiest and emptiest positions
+  const beatDensity = {};  // "beat.sub" -> count (collapsed across bars)
+  Object.values(allNotes).forEach((notes) => {
+    notes.forEach((n) => {
+      const beatInBar = ((n.start - 1) % 4);
+      const beat = Math.floor(beatInBar) + 1;
+      const frac = beatInBar - Math.floor(beatInBar);
+      const sub = Math.round(frac / 0.25) + 1;
+      const pos = `${beat}.${sub}`;
+      beatDensity[pos] = (beatDensity[pos] || 0) + 1;
+    });
+  });
+
+  const sortedPositions = Object.entries(beatDensity).sort((a, b) => b[1] - a[1]);
+  if (sortedPositions.length > 0) {
+    const busiest = sortedPositions.slice(0, 4).map(([p, c]) => `${p}(${c})`).join(", ");
+    lines.push(`Busiest beat positions: ${busiest}`);
+
+    // Find open positions (subdivisions with no hits)
+    const allSubs = [];
+    for (let beat = 1; beat <= 4; beat++) {
+      for (let sub = 1; sub <= 4; sub++) {
+        allSubs.push(`${beat}.${sub}`);
+      }
+    }
+    const openPositions = allSubs.filter((p) => !beatDensity[p]);
+    if (openPositions.length > 0 && openPositions.length <= 8) {
+      lines.push(`Open beat positions: ${openPositions.join(", ")}`);
+    } else if (openPositions.length > 8) {
+      lines.push(`Open positions: ${openPositions.length}/16 subdivisions open — sparse arrangement`);
+    }
+  }
+
+  // Frequency coverage
+  if (freqRangesCovered.size > 0) {
+    lines.push(`Frequency ranges covered: ${[...freqRangesCovered].join(", ")}`);
+    // Identify gaps
+    const allRanges = ["Sub (30-80 Hz)", "Low-Mid (80-300 Hz)", "Mid (200-2000 Hz)", "Mid-High (500-5000 Hz)", "High (3-10 kHz)"];
+    const uncovered = allRanges.filter((r) => {
+      return ![...freqRangesCovered].some((covered) => covered.includes(r.split(" ")[0]));
+    });
+    if (uncovered.length > 0) {
+      lines.push(`Frequency gaps: ${uncovered.join(", ")}`);
+    }
+  }
+
+  // Harmonic content
+  if (harmonicPitches.size > 0) {
+    const pitchClassNames = [...harmonicPitches].sort((a, b) => a - b)
+      .map((pc) => NOTE_NAMES[pc]);
+    lines.push(`Pitch classes in use: ${pitchClassNames.join(", ")}`);
+  }
+
+  // Groove analysis — swing detection
+  let onBeatHits = 0;
+  let offBeatHits = 0;
+  Object.values(allNotes).forEach((notes) => {
+    notes.forEach((n) => {
+      const frac = (n.start - 1) % 1;
+      if (Math.abs(frac) < 0.01 || Math.abs(frac - 0.5) < 0.01) {
+        onBeatHits++;
+      } else {
+        offBeatHits++;
+      }
+    });
+  });
+  const swingRatio = totalNoteCount > 0 ? offBeatHits / totalNoteCount : 0;
+  if (swingRatio > 0.4) {
+    lines.push("Groove character: heavy syncopation/swing");
+  } else if (swingRatio > 0.2) {
+    lines.push("Groove character: moderate swing/offbeat presence");
+  } else {
+    lines.push("Groove character: straight/on-beat dominant");
+  }
+
+  return lines.join("\n");
+}
+
+// === Element-Specific Generation Instructions ===
+// Returns targeted instructions for the guided mode generation based on what already exists.
+function buildElementSpecificInstructions(guidedEl, elements) {
+  const instructions = [];
+
+  const hasElement = (id) => {
+    const e = elements[id];
+    return e && e.outputs && e.outputs.length > 0;
+  };
+
+  switch (guidedEl.id) {
+    case "kick":
+      instructions.push("Generate the foundational kick pattern. This is the first element — establish the rhythmic backbone.");
+      break;
+    case "clap":
+      if (hasElement("kick")) {
+        instructions.push("The kick pattern exists. Place clap/snare to complement it — typically on beats 2 and 4, but check the kick positions to avoid masking.");
+      }
+      break;
+    case "hats":
+      if (hasElement("kick") || hasElement("clap")) {
+        instructions.push("Kick and/or clap exist. Design hi-hats that weave between the existing drum hits. Fill gaps in the rhythmic grid, add 16th-note movement where the kick and clap leave space.");
+      }
+      break;
+    case "perc":
+      if (hasElement("kick") || hasElement("hats")) {
+        instructions.push("Core drums exist. Add percussion that complements without cluttering. Target open beat positions — use the cross-element analysis to find rhythmic gaps.");
+      }
+      break;
+    case "bass":
+      if (hasElement("kick")) {
+        instructions.push("Kick pattern exists. Lock the bass to the kick rhythm — root notes typically align with kick hits, with movement between kicks. Respect sidechain ducking.");
+      }
+      instructions.push("Bass should sit in Sub (30-80 Hz) for sub and Low-Mid (80-300 Hz) for character. Keep mono below 150 Hz.");
+      break;
+    case "chords":
+      if (hasElement("sub") || hasElement("midbass")) {
+        instructions.push("Bass exists. Chords/pads should sit above the bass frequency range (above 300 Hz). Avoid root-heavy voicings that clash with the bass fundamental.");
+      }
+      instructions.push("Use the session key and scale. Chord voicings should complement existing melodic content if any.");
+      break;
+    case "lead":
+      instructions.push("This is the melodic hook. It should be memorable and sit in a frequency range that cuts through the existing arrangement.");
+      if (hasElement("chords") || hasElement("pad") || hasElement("stabs")) {
+        instructions.push("Harmonic content already exists — use complementary intervals. Create call-and-response with existing melodic elements.");
+      }
+      break;
+    case "vocals":
+      instructions.push("Describe a vocal arrangement approach rather than MIDI. Consider vocal style, processing chain, rhythmic placement relative to existing elements.");
+      break;
+    case "fx":
+      instructions.push("Generate FX and transition ideas. Consider risers, impacts, sweeps that work with the arrangement. These are arrangement automation tools, not permanent layers.");
+      break;
+  }
+
+  return instructions.length > 0 ? instructions.join(" ") : "";
+}
+
 // === Send Element Message ===
 async function sendElementMessage(text) {
   if (!text.trim() || sessionState.loading) return;
@@ -1087,7 +1599,7 @@ async function sendElementMessage(text) {
         outputEntry.notes = result.output.notes;
       }
       elem.outputs.push(outputEntry);
-      elem.summary = result.output.description || result.output.name || "";
+      elem.summary = result.output.musical_summary || result.output.description || result.output.name || "";
       renderOutputList();
     }
     saveSession();
@@ -1579,6 +2091,24 @@ $("#soundcloud-disconnect-btn").addEventListener("click", async () => {
   _sessionReady = true;
   updateTrackCount();
 
+  // Apply mode visibility after session restore
+  const guidedArea = $("#guided-area");
+  const studioArea = $("#studio-area");
+  const chatSection = $("#element-chat");
+  const resizeHandle = $("#resize-handle");
+  if (sessionState.mode === "guided") {
+    guidedArea.classList.remove("hidden");
+    studioArea.classList.add("hidden");
+    if (chatSection) chatSection.classList.add("hidden");
+    if (resizeHandle) resizeHandle.classList.add("hidden");
+    renderGuidedElements();
+  } else {
+    guidedArea.classList.add("hidden");
+    studioArea.classList.remove("hidden");
+    if (chatSection) chatSection.classList.remove("hidden");
+    if (resizeHandle) resizeHandle.classList.remove("hidden");
+  }
+
   // Check service statuses (non-blocking)
   checkSpotifyStatus();
   checkSoundCloudStatus();
@@ -1630,15 +2160,15 @@ $("#download-all-btn").addEventListener("click", async () => {
   const scaleVal = $("#scale").value || "minor";
   const scaleCap = scaleVal.charAt(0).toUpperCase() + scaleVal.slice(1);
   const genre = genreSelect.options[genreSelect.selectedIndex]?.text || "Tech House";
-  const skillCap = sessionState.skillLevel.charAt(0).toUpperCase() + sessionState.skillLevel.slice(1);
+  const modeCap = sessionState.mode.charAt(0).toUpperCase() + sessionState.mode.slice(1);
   const today = new Date().toISOString().split("T")[0];
 
-  const sessionInfo = `BeatBrain Session Export
+  const sessionInfo = `DAW Brain Session Export
 Date: ${today}
 BPM: ${bpm}
 Key: ${keyVal} ${scaleCap}
 Genre: ${genre}
-Skill Level: ${skillCap}
+Mode: ${modeCap}
 
 Included Files:
 ${fileLines.join("\n")}
@@ -1659,3 +2189,54 @@ ${fileLines.join("\n")}
 
 // Clear session
 $("#clear-session-btn").addEventListener("click", clearSession);
+$("#guided-clear-session-btn").addEventListener("click", clearSession);
+
+// Guided download all
+$("#guided-download-all-btn").addEventListener("click", async () => {
+  const bpm = parseInt($("#bpm").value) || 128;
+  const allOutputs = [];
+
+  GUIDED_ELEMENTS.forEach((gel) => {
+    gel.mapTo.forEach((id) => {
+      const elem = sessionState.elements[id];
+      if (!elem || !elem.outputs) return;
+      elem.outputs.forEach((o) => {
+        if (o.type === "midi" && Array.isArray(o.notes) && o.notes.length > 0) {
+          allOutputs.push({ ...o, element: id });
+        }
+      });
+    });
+  });
+
+  if (allOutputs.length === 0) return;
+
+  const zip = new JSZip();
+  const fileLines = [];
+
+  allOutputs.forEach((o) => {
+    const bars = barsFromNotes(o.notes);
+    const elemName = o.element || "general";
+    const filename = `${elemName}_${bars}bar.mid`;
+    const blob = generateMidiBlob(o.notes, bpm);
+    zip.file(filename, blob);
+    const vels = o.notes.map((n) => n.velocity || 100);
+    fileLines.push(`- ${filename} (${o.notes.length} notes, vel ${Math.min(...vels)}-${Math.max(...vels)})`);
+  });
+
+  const keyVal = $("#key").value || "C";
+  const scaleVal = $("#scale").value || "minor";
+  const genre = genreSelect.options[genreSelect.selectedIndex]?.text || "Tech House";
+  const today = new Date().toISOString().split("T")[0];
+
+  zip.file("session_info.txt", `DAW Brain Guided Session Export\nDate: ${today}\nBPM: ${bpm}\nKey: ${keyVal} ${scaleVal}\nGenre: ${genre}\n\nFiles:\n${fileLines.join("\n")}\n`);
+
+  const zipBlob = await zip.generateAsync({ type: "blob" });
+  const url = URL.createObjectURL(zipBlob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `DAWBrain_Guided_${today}.zip`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
