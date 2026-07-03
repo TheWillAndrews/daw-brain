@@ -30,8 +30,37 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      # Install deps and start the Flask dev server so Claude can exercise
+      # the app. --debug disables the heartbeat watchdog, which would
+      # otherwise os._exit(0) the server after 10 minutes without a browser.
+      # The server needs ANTHROPIC_API_KEY at import time to construct its
+      # Anthropic client.
+      - name: Project Setup
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          pip install -r backend/requirements.txt
+          cd backend
+          nohup python app.py --debug > server.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:5050/ > /dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:5050/ > /dev/null || (echo "Flask server failed to start"; tail -50 server.log; exit 1)
+
       - name: Run Claude Code
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: |
+            --allowedTools "Bash(pip install:*),Bash(python:*),Bash(curl:*),Bash(sqlite3:*),mcp__playwright__browser_navigate,mcp__playwright__browser_snapshot,mcp__playwright__browser_click,mcp__playwright__browser_type,mcp__playwright__browser_take_screenshot,mcp__playwright__browser_console_messages"
+            --mcp-config '{"mcpServers":{"playwright":{"command":"npx","args":["@playwright/mcp@latest","--headless","--browser","chrome","--allowed-origins","127.0.0.1:5050;localhost:5050;fonts.googleapis.com;fonts.gstatic.com"]}}}'
+            --append-system-prompt "The Flask dev server is already running at http://127.0.0.1:5050 (started with --debug, heartbeat watchdog disabled). Its logs are in backend/server.log. Inspect application state with the sqlite3 CLI against ~/.daw-brain/dawbrain.db (WAL mode). Generated MIDI/JSON outputs land in backend/outputs/. There are no tests or linter in this repo - verify changes by exercising the running server with curl or the Playwright browser tools. If you edit backend code, restart the server the same way Project Setup started it. Project conventions, the 23-element sync rule, and gotchas are documented in CLAUDE.md - follow it."
