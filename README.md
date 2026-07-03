@@ -34,3 +34,4 @@ Or double-click `launcher/DAW Brain.app` (macOS) / `launcher/DAW Brain.bat`
 The app reads `ANTHROPIC_API_KEY` from `backend/.env` (gitignored), `~/.env`,
 or the environment. The `.env` file should contain
 `ANTHROPIC_API_KEY=sk-ant-...`.
+
