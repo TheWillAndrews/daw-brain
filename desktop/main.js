@@ -3,22 +3,60 @@ const { spawn, execSync } = require("child_process");
 const path = require("path");
 const http = require("http");
 const fs = require("fs");
+const os = require("os");
 
 const PORT = 5050;
 const POLL_INTERVAL = 500;
-const POLL_TIMEOUT = 15000;
+// First launch on a cold machine (fresh imports, antivirus scan) can take
+// well over 15s — give Flask a generous window before declaring failure.
+const POLL_TIMEOUT = 60000;
+const isMac = process.platform === "darwin";
+const isWin = process.platform === "win32";
 
-// Find Python 3 — try common locations, fall back to PATH
+// Find a real Python 3 — try common install locations, then PATH.
+// Each candidate is validated by running `--version`; this also filters out
+// the Windows Store python.exe stub, which prints a message and exits non-zero.
 function findPython() {
-  const candidates = [
-    "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3",
-    "/usr/local/bin/python3",
-    "/opt/homebrew/bin/python3",
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
+  const candidates = [];
+
+  if (isWin) {
+    const roots = [
+      path.join(process.env.LOCALAPPDATA || "", "Programs", "Python"),
+      "C:\\Program Files",
+      "C:\\",
+    ];
+    for (const root of roots) {
+      let entries = [];
+      try {
+        entries = fs.readdirSync(root);
+      } catch (_) {
+        continue;
+      }
+      for (const e of entries) {
+        if (/^Python3\d+/i.test(e)) {
+          candidates.push(path.join(root, e, "python.exe"));
+        }
+      }
+    }
+    candidates.push("py", "python");
+  } else {
+    candidates.push(
+      "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3",
+      "/usr/local/bin/python3",
+      "/opt/homebrew/bin/python3",
+      "python3"
+    );
   }
-  return "python3"; // rely on PATH
+
+  for (const p of candidates) {
+    try {
+      execSync(`"${p}" --version`, { stdio: "pipe", timeout: 5000 });
+      return p;
+    } catch (_) {
+      // Not a working Python — try the next candidate
+    }
+  }
+  return isWin ? "python" : "python3";
 }
 
 let mainWindow = null;
@@ -26,20 +64,24 @@ let flaskProcess = null;
 let serverReady = false;
 
 // --- Resolve backend path ---
-// In dev: ./backend (symlink to daw-brain/)
+// In dev: ../backend (sibling folder in the repo)
 // In packaged app: process.resourcesPath/backend
 function getBackendPath() {
   if (app.isPackaged) {
     return path.join(process.resourcesPath, "backend");
   }
-  return path.join(__dirname, "backend");
+  return path.join(__dirname, "..", "backend");
 }
 
-// --- Load ANTHROPIC_API_KEY from the backend .env file ---
+// --- Load ANTHROPIC_API_KEY from the environment or a .env file ---
 function loadApiKey() {
+  if (process.env.ANTHROPIC_API_KEY) {
+    return process.env.ANTHROPIC_API_KEY;
+  }
+
   const envPaths = [
     path.join(getBackendPath(), ".env"),
-    path.join(process.env.HOME || "", ".env"),
+    path.join(os.homedir(), ".env"),
   ];
 
   for (const envPath of envPaths) {
@@ -56,16 +98,18 @@ function loadApiKey() {
     }
   }
 
-  // Fallback: try sourcing zshrc
-  try {
-    const result = execSync(
-      'source ~/.zshrc 2>/dev/null; echo "$ANTHROPIC_API_KEY"',
-      { shell: "/bin/zsh", encoding: "utf8", timeout: 5000 }
-    );
-    const key = result.trim();
-    if (key && key.startsWith("sk-")) return key;
-  } catch (_) {
-    // zshrc source failed
+  // Fallback: try sourcing zshrc (macOS only)
+  if (isMac) {
+    try {
+      const result = execSync(
+        'source ~/.zshrc 2>/dev/null; echo "$ANTHROPIC_API_KEY"',
+        { shell: "/bin/zsh", encoding: "utf8", timeout: 5000 }
+      );
+      const key = result.trim();
+      if (key && key.startsWith("sk-")) return key;
+    } catch (_) {
+      // zshrc source failed
+    }
   }
 
   return null;
@@ -156,10 +200,17 @@ function waitForServer() {
 // --- Kill Flask on quit ---
 function killFlaskSync() {
   try {
-    execSync(`lsof -ti:${PORT} | xargs kill -9 2>/dev/null`, {
-      shell: "/bin/zsh",
-      timeout: 3000,
-    });
+    if (isWin) {
+      execSync(
+        `powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort ${PORT} -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }"`,
+        { stdio: "pipe", timeout: 5000 }
+      );
+    } else {
+      execSync(`lsof -ti:${PORT} | xargs kill -9 2>/dev/null`, {
+        shell: "/bin/zsh",
+        timeout: 3000,
+      });
+    }
   } catch (_) {}
 
   if (flaskProcess) {
@@ -241,7 +292,7 @@ const ELECTRON_CSS = `
   /* Make the top nav the window drag bar */
   .top-nav {
     -webkit-app-region: drag;
-    padding-left: 78px !important;
+    ${isMac ? "padding-left: 78px !important;" : ""}
   }
 
   /* All interactive elements inside top-nav must opt out of drag */
@@ -273,8 +324,10 @@ function createWindow() {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 16, y: 14 },
+    // Frameless inset title bar is macOS-only; Windows/Linux get a normal frame
+    ...(isMac
+      ? { titleBarStyle: "hiddenInset", trafficLightPosition: { x: 16, y: 14 } }
+      : {}),
     backgroundColor: "#0a0a10",
     show: false,
     webPreferences: {
@@ -306,8 +359,9 @@ app.whenReady().then(async () => {
       "DAW Brain — Missing API Key",
       "Could not find ANTHROPIC_API_KEY.\n\n" +
         "Make sure your key is in one of these locations:\n" +
-        "  • ~/Desktop/TRK_TOOLS/daw-brain/.env\n" +
-        "  • ~/.zshrc (export ANTHROPIC_API_KEY=sk-...)\n\n" +
+        `  • ${path.join(getBackendPath(), ".env")}\n` +
+        `  • ${path.join(os.homedir(), ".env")}\n` +
+        "  • the ANTHROPIC_API_KEY environment variable\n\n" +
         "The .env file should contain:\n" +
         "ANTHROPIC_API_KEY=sk-ant-..."
     );
@@ -330,7 +384,7 @@ app.whenReady().then(async () => {
     } catch (err) {
       dialog.showErrorBox(
         "DAW Brain — Server Error",
-        `${err.message}\n\nCheck the log at:\n${path.join(getBackendPath(), "server.log")}\n\nMake sure Python 3.11 is installed and all dependencies are available:\n  pip3 install flask anthropic midiutil`
+        `${err.message}\n\nCheck the log at:\n${path.join(getBackendPath(), "server.log")}\n\nMake sure Python 3.11+ is installed and all dependencies are available:\n  pip install -r requirements.txt (in the backend folder)`
       );
       app.quit();
       return;
