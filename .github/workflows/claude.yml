@@ -60,9 +60,6 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          # TEMPORARY: surface the Claude execution error in the run log.
-          # Remove once the API-key issue is diagnosed.
-          show_full_output: true
           claude_args: |
             --allowedTools "Bash(pip install:*),Bash(python:*),Bash(curl:*),Bash(sqlite3:*),mcp__playwright__browser_navigate,mcp__playwright__browser_snapshot,mcp__playwright__browser_click,mcp__playwright__browser_type,mcp__playwright__browser_take_screenshot,mcp__playwright__browser_console_messages"
             --mcp-config '{"mcpServers":{"playwright":{"command":"npx","args":["@playwright/mcp@latest","--headless","--browser","chrome","--allowed-origins","127.0.0.1:5050;localhost:5050;fonts.googleapis.com;fonts.gstatic.com"]}}}'
